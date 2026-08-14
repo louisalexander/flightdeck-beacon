@@ -1,7 +1,8 @@
 # Beacon — Re-assert on Demand — Design
 
 **Date:** 2026-08-14
-**Status:** Designed, not built.
+**Status:** Built as `4805279` in the `homeassistant` repo. All tiers pass. **Not deployed** —
+the push restarts the live house.
 **Extends:** `docs/superpowers/specs/2026-08-13-beacon-design.md`
 **Repos touched:** `homeassistant` only. No change to `beacon` or `flightdeck`.
 
@@ -113,10 +114,30 @@ One new automation, `Beacon — Re-assert From Mirror`, with four triggers:
 | `input_boolean.sleeping` → `off` | Good Morning does not repaint |
 
 Action for all four: call `script.beacon_paint` with `base` and `rgb` read back from the
-mirror and `landed: false`.
+mirror, plus `transition: 2`.
 
 Because the strict-indicator decision means idle → off, `beacon_paint`'s existing `default:`
 branch (`light.turn_off`) already does the right thing. **No new branch in `beacon_paint`.**
+
+> **Corrected during implementation.** This section originally specified `landed: false`.
+> `beacon_paint` has no `landed` field — its signature is `base` / `rgb` / `transition`.
+> The landing lives entirely in `beacon_render`, which is the correct split: `beacon_paint`
+> paints steady states only, so there is no edge for the re-assert to accidentally replay.
+
+#### The automation must check the gates itself
+
+`script.beacon_paint` has **no master-switch gate** — only `beacon_render` does. So the
+automation conditions on `beacon_enabled` being `on` and `sleeping` being `off` before it
+paints anything.
+
+Without that check, turning the lamp on by hand while Beacon was disabled would repaint it,
+which breaks the escape hatch the strict-indicator decision depends on. With it, a manual
+turn-on while disabled leaves the lamp alone — it is an ordinary room lamp again, which is
+exactly what "disabled" is supposed to mean.
+
+Both gate checks sit in the **actions**, after the start delay, not in the `conditions:`
+block. Conditions are evaluated before any action runs, so gating up there would read the
+helpers mid-restore and fail on precisely the restart this is meant to recover from.
 
 #### Loop guard
 
@@ -194,7 +215,7 @@ Extends §5 of the v1 spec.
 | Mirror stale from laptop sleep | Lamp paints the last known state, which may be hours old | **Inherited, not new** — same root cause as "laptop sleeps mid-task" in v1 |
 | Mirror unrestored at HA start | Re-assert aborts; lamp waits for the next real transition | Designed for; fails toward inaction |
 | Loop between automation and `beacon_paint` | Prevented by two independent guards | Covered by acceptance case 7 |
-| Manual turn-on while `beacon_enabled` off | `beacon_paint`'s master-off branch turns it straight back off | **Intended** — that is what disabled means |
+| Manual turn-on while `beacon_enabled` off | Automation does not fire; the lamp stays on as an ordinary room lamp | **Intended** — this *is* the escape hatch |
 
 The mirror is worth stating plainly: it is only ever as fresh as Beacon's last push. It
 introduces no new staleness, because Beacon pushes on every transition — but it faithfully
