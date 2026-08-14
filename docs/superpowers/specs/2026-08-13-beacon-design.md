@@ -1,7 +1,8 @@
 # Beacon — Ambient Agent-Fleet Light — Design
 
 **Date:** 2026-08-13
-**Status:** Approved design, ready for implementation planning
+**Status:** Built and deployed 2026-08-13. See `docs/superpowers/plans/2026-08-13-beacon-v1.md`
+for the implementation and the record of what changed during it.
 **Repos touched:** `beacon` (new), `flightdeck` (one seam), `homeassistant` (script + helper + fixture)
 
 ## Problem
@@ -53,7 +54,14 @@ colour*. `candle` and `fire` force a warm palette and `prism` crawls through hue
 those three can stay blue.
 
 `fire` being unable to hold an arbitrary colour disqualifies it here but makes it precisely
-right for the deferred `failed` state, which wants a red flame — see "Deferred".
+right for the `failed` state, which wants a red flame.
+
+> **Consequence found during live acceptance.** Under an effect, the bulb reports its own
+> palette rather than the RGB you sent, so `light.hue_color_lamp_1`'s `rgb_color` does **not**
+> read back the requested colour for `working` (`sparkle`) or `failed` (`fire`). This is bulb
+> behaviour, not a pipeline fault — but it means API readback cannot verify the colour of an
+> effect-driven state. Verify those by eye, or by asserting the `effect` attribute plus the
+> service call that was sent.
 
 ## States
 
@@ -62,12 +70,19 @@ Four states, folded from the whole fleet:
 | State | Lamp | Meaning |
 |---|---|---|
 | `idle` | off | nothing in flight |
-| `working` | dim blue, shimmering | at least one agent is working |
+| `working` | dim blue ~12%, `sparkle` | at least one agent is working |
 | `blocked` | solid amber, ~35% | at least one agent is waiting on you |
+| `failed` | red ~45%, `fire` | something broke; go restart it |
 | landing | snap green → hold 15s → fade 15s | an agent just finished |
 
 `blocked` is solid on purpose: nothing is actually moving, and a shimmer would imply
-otherwise.
+otherwise. `failed` moves again, deliberately — amber-solid and red-solid are weak
+neighbours across a dim room, so red is distinguished by motion as well as hue. Priority is
+`failed > blocked > working > idle`, and a landing is suppressed under both `failed` and
+`blocked`: only one of those two things needs your hands.
+
+`sparkle` was chosen over `opal` and `glisten` by comparing all three live on the lamp at
+the real intended 12% brightness.
 
 ### Inherited limitation: `blocked` over-reports
 
@@ -102,9 +117,16 @@ apart. Those hex values were chosen for a small backlit key against black; on a 
 filling a room, **keep the hue identical and let brightness differ per renderer**. Do not
 fork the colours.
 
-`failed` (`#B42318`) is declared in `fleet.json` but never emitted — `fleet-emit` has no
-`StopFailure` hook. It is **deferred out of v1** but fully specified under "Deferred", so
-the four-state fold below has a defined place to grow a fifth.
+> **Changed during implementation.** `failed` (`#B42318`) was deferred when this was written,
+> because emitting it needed a `StopFailure` hook probe in flightdeck. Mid-build, flightdeck
+> shipped `bin/fleet-fail` (commit `661eb34`), which sets `state: "failed"` by hand from the
+> Stream Deck and then calls `fleet-reconcile` — a path that reaches this renderer. That made
+> the deferral actively harmful: the fold mapped unknown states to `idle`, so marking a session
+> failed would have turned the lamp **off**, reading as "everything landed" at the moment
+> something broke. `failed` was therefore built into v1 at the agreed treatment — red with
+> Hue's native `fire` effect, priority `failed > blocked > working > idle`, landings suppressed
+> under it. What remains deferred is only flightdeck detecting a died-on-an-API-error turn
+> *automatically*; see "Deferred".
 
 ## Constraints inherited from flightdeck
 
@@ -122,15 +144,16 @@ apply to it verbatim:
 
 ## Prerequisite: flightdeck must be installed
 
-flightdeck is **built but not wired** on this machine as of 2026-08-13: `~/.fleet/` holds
-only `fleet.log` with no `sessions/`, the launchd reaper is not loaded, and `fleet-emit` is
-registered in no `settings.json`. Installation is flightdeck's own **Task 12**
-(`install.sh`, `fleet-doctor`), which is not yet built.
+~~flightdeck is **built but not wired**~~ — **resolved during implementation.** When this was
+written, `~/.fleet/` held only `fleet.log`, the launchd reaper was not loaded, and
+`fleet-emit` was registered in no `settings.json`; installation was flightdeck's own Task 12
+(`install.sh`, `fleet-doctor`), then unbuilt. That landed mid-build, so Beacon's live
+acceptance was able to run.
 
-Beacon therefore **cannot be verified end-to-end** until that lands. It can, however, be
-built and fully unit-tested before it — because the seam is JSON on stdin, every fold
-behaviour is reachable with a synthetic snapshot and no live agent at all. Only the final
-acceptance task depends on flightdeck being live.
+The property that made the ordering not matter is worth keeping: because the seam is **JSON
+on stdin**, every fold behaviour is reachable with a synthetic snapshot and no live agent at
+all. Tasks 1-6 were built and fully tested before flightdeck was ever installed; only the
+final acceptance depended on it.
 
 ## Architecture
 
