@@ -1,7 +1,8 @@
 # Beacon — Ambient Agent-Fleet Light — Design
 
 **Date:** 2026-08-13
-**Status:** Approved design, ready for implementation planning
+**Status:** Built and deployed 2026-08-13. See `docs/superpowers/plans/2026-08-13-beacon-v1.md`
+for the implementation and the record of what changed during it.
 **Repos touched:** `beacon` (new), `flightdeck` (one seam), `homeassistant` (script + helper + fixture)
 
 ## Problem
@@ -48,12 +49,28 @@ model, same bridge, same integration — only the firmware differed.
 > `homeassistant.reload_config_entry` on the entity to re-read capabilities from the bridge.
 > Expect the same after any future Hue firmware change.
 
-Of the six effects, only `opal`, `glisten` and `sparkle` shimmer *on top of the current
-colour*. `candle` and `fire` force a warm palette and `prism` crawls through hues — none of
-those three can stay blue.
+Of the six effects, **only `opal` actually shimmers on top of the requested colour.**
+`candle` and `fire` force a warm palette and `prism` crawls through hues, as expected — but
+`sparkle` and `glisten` were *also* measured forcing a warm palette, despite being documented
+as colour-preserving shimmers. Measured on this bulb at 12%, sending colour, brightness and
+effect in a single service call:
+
+| effect | resulting `rgb_color` | holds blue? |
+|---|---|---|
+| (none) | `[61, 138, 255]` | yes — true blue |
+| `opal` | `[219, 185, 255]` | yes — pale blue-lavender |
+| `glisten` | `[255, 170, 95]` | **no — warm orange** |
+| `sparkle` | `[255, 167, 88]` | **no — warm orange** |
 
 `fire` being unable to hold an arbitrary colour disqualifies it here but makes it precisely
-right for the deferred `failed` state, which wants a red flame — see "Deferred".
+right for the `failed` state, which wants a red flame.
+
+> **Consequence found during live acceptance.** Under an effect, the bulb reports its own
+> palette rather than the RGB you sent, so `light.hue_color_lamp_1`'s `rgb_color` does **not**
+> read back the requested colour for `working` (`opal`) or `failed` (`fire`). This is bulb
+> behaviour, not a pipeline fault — but it means API readback cannot verify the colour of an
+> effect-driven state. Verify those by eye, or by asserting the `effect` attribute plus the
+> service call that was sent.
 
 ## States
 
@@ -62,12 +79,22 @@ Four states, folded from the whole fleet:
 | State | Lamp | Meaning |
 |---|---|---|
 | `idle` | off | nothing in flight |
-| `working` | dim blue, shimmering | at least one agent is working |
+| `working` | dim blue ~12%, `opal` | at least one agent is working |
 | `blocked` | solid amber, ~35% | at least one agent is waiting on you |
+| `failed` | red ~45%, `fire` | something broke; go restart it |
 | landing | snap green → hold 15s → fade 15s | an agent just finished |
 
 `blocked` is solid on purpose: nothing is actually moving, and a shimmer would imply
-otherwise.
+otherwise. `failed` moves again, deliberately — amber-solid and red-solid are weak
+neighbours across a dim room, so red is distinguished by motion as well as hue. Priority is
+`failed > blocked > working > idle`, and a landing is suppressed under both `failed` and
+`blocked`: only one of those two things needs your hands.
+
+**`opal` is the pinned choice**, and the route there is worth recording. `sparkle` was picked
+first from a live three-way comparison — but that comparison was judged on shimmer *texture*
+while the lamp was in fact already rendering warm orange, and the mistake only surfaced once a
+separate brightness bug was fixed and the colour could be read cleanly. `opal` is the only
+effect on this hardware that keeps `working` in the blue family.
 
 ### Inherited limitation: `blocked` over-reports
 
@@ -102,9 +129,16 @@ apart. Those hex values were chosen for a small backlit key against black; on a 
 filling a room, **keep the hue identical and let brightness differ per renderer**. Do not
 fork the colours.
 
-`failed` (`#B42318`) is declared in `fleet.json` but never emitted — `fleet-emit` has no
-`StopFailure` hook. It is **deferred out of v1** but fully specified under "Deferred", so
-the four-state fold below has a defined place to grow a fifth.
+> **Changed during implementation.** `failed` (`#B42318`) was deferred when this was written,
+> because emitting it needed a `StopFailure` hook probe in flightdeck. Mid-build, flightdeck
+> shipped `bin/fleet-fail` (commit `661eb34`), which sets `state: "failed"` by hand from the
+> Stream Deck and then calls `fleet-reconcile` — a path that reaches this renderer. That made
+> the deferral actively harmful: the fold mapped unknown states to `idle`, so marking a session
+> failed would have turned the lamp **off**, reading as "everything landed" at the moment
+> something broke. `failed` was therefore built into v1 at the agreed treatment — red with
+> Hue's native `fire` effect, priority `failed > blocked > working > idle`, landings suppressed
+> under it. What remains deferred is only flightdeck detecting a died-on-an-API-error turn
+> *automatically*; see "Deferred".
 
 ## Constraints inherited from flightdeck
 
@@ -112,9 +146,13 @@ the four-state fold below has a defined place to grow a fifth.
 apply to it verbatim:
 
 - **Python 3.9 syntax, standard library only.** No third-party packages, no venv. 3.9 is
-  the floor because `fleet-reap` runs under **launchd**, whose `PATH` resolves
-  CommandLineTools 3.9.6 rather than the Homebrew 3.13 an interactive shell gets — and reap
-  calls reconcile, which calls `beacon-render`. Avoid `match` and `X | Y` annotations.
+  the floor because of `beacon-render` itself, not `fleet-reap`: `fleet-reap`'s own launchd
+  plist explicitly invokes Homebrew's `python3.13`, so checking the plist and seeing 3.13
+  will (wrongly) suggest this constraint can be relaxed. The real cause is one hop further
+  down the chain — `bin/beacon-render`'s own `#!/usr/bin/env python3` shebang, resolved
+  fresh when it is spawned as a subprocess of `fleet-reconcile`. Under launchd's inherited
+  `PATH` (unlike an interactive shell's), `env python3` resolves to CommandLineTools'
+  `/usr/bin/python3` (3.9.6), not Homebrew's 3.13. Avoid `match` and `X | Y` annotations.
 - **Never write to stdout, always exit 0.** `beacon-render` is reachable from a Claude Code
   hook. A bug in it must never break a real agent. Errors go to a log file only.
 - **All writes atomic** — temp file in the same directory, then `os.replace()`.
@@ -122,15 +160,16 @@ apply to it verbatim:
 
 ## Prerequisite: flightdeck must be installed
 
-flightdeck is **built but not wired** on this machine as of 2026-08-13: `~/.fleet/` holds
-only `fleet.log` with no `sessions/`, the launchd reaper is not loaded, and `fleet-emit` is
-registered in no `settings.json`. Installation is flightdeck's own **Task 12**
-(`install.sh`, `fleet-doctor`), which is not yet built.
+~~flightdeck is **built but not wired**~~ — **resolved during implementation.** When this was
+written, `~/.fleet/` held only `fleet.log`, the launchd reaper was not loaded, and
+`fleet-emit` was registered in no `settings.json`; installation was flightdeck's own Task 12
+(`install.sh`, `fleet-doctor`), then unbuilt. That landed mid-build, so Beacon's live
+acceptance was able to run.
 
-Beacon therefore **cannot be verified end-to-end** until that lands. It can, however, be
-built and fully unit-tested before it — because the seam is JSON on stdin, every fold
-behaviour is reachable with a synthetic snapshot and no live agent at all. Only the final
-acceptance task depends on flightdeck being live.
+The property that made the ordering not matter is worth keeping: because the seam is **JSON
+on stdin**, every fold behaviour is reachable with a synthetic snapshot and no live agent at
+all. Tasks 1-6 were built and fully tested before flightdeck was ever installed; only the
+final acceptance depended on it.
 
 ## Architecture
 
@@ -200,14 +239,16 @@ guarantee extends outward across this seam.
 `bin/beacon-render` is a pure function wrapped in thin IO.
 
 ```
-fold(sessions, prev) -> (base, landed, next_prev)
+fold(sessions, prev) -> (base, landed, next_prev, changed)
 
+  failed   = any(s.state == "failed")
   blocked  = any(s.state == "blocked")
   working  = any(s.state == "working")
   done_set = {s.session_id for s in sessions if s.state == "done"}
 
-  base   = "blocked" if blocked else "working" if working else "idle"
-  landed = bool(done_set - prev.done_set) and base != "blocked"
+  base    = "failed" if failed else "blocked" if blocked else "working" if working else "idle"
+  landed  = bool(done_set - prev.done_set) and base not in ("blocked", "failed")
+  changed = landed or base != prev.base
 ```
 
 Two decisions are encoded here and both matter:
@@ -218,9 +259,10 @@ Two decisions are encoded here and both matter:
 finished"). Testing `done_set` for non-emptiness would re-fire green on every 15s reap tick
 forever. Only a session *entering* the done set counts.
 
-**`and base != "blocked"`** implements the agreed priority — amber outranks green. When
-some other agent is stuck on you, a landing elsewhere does not steal the lamp, because only
-one of those two things needs your hands.
+**`and base not in ("blocked", "failed")`** implements the agreed priority — amber and red
+both outrank green. When some other agent is stuck on you, or something has broken, a
+landing elsewhere does not steal the lamp, because those are the only two things that need
+your hands.
 
 Green must still fire while another session is `working` — that was the chosen concurrency
 semantic: the lamp returns to blue after the fade if anything is still in flight, and to
@@ -241,21 +283,31 @@ across all hooks. Nothing on that path may block on the network.
 
 ## 3 — The HA renderer
 
-`script.beacon_render` in `scripts.yaml`, `mode: restart`, fields `base`
-(`idle|working|blocked`) and `landed` (bool).
+Two scripts in `scripts.yaml`, both `mode: restart`.
+
+`script.beacon_render` is the entry point `beacon-render` calls. Fields: `base`
+(`idle|working|blocked|failed`), `landed` (bool), `rgb` (the base state's colour) and
+`rgb_done` (the landing flash's colour) — the last two are how the snapshot's palette rides
+along on the service call rather than being hardcoded in HA.
 
 ```
 1. input_boolean.beacon_enabled off  OR  input_boolean.sleeping on
      → light.turn_off, stop.
 2. landed
-     → green, transition 0, full brightness
+     → green (rgb_done), transition 0, full brightness
      → delay 15s
-     → render base with transition 15
-3. else render base with transition 2:
+     → script.beacon_paint(base, rgb, transition 15)
+3. else script.beacon_paint(base, rgb, transition 2):
+     failed  → red,    ~45%, `fire` effect
      blocked → amber,  ~35%, solid
      working → blue,   ~12%, shimmer (see §4)
      idle    → light.turn_off
 ```
+
+`script.beacon_paint` is the shared base-state renderer, split out of `beacon_render`
+because the landing branch has to fall through to *exactly* this logic after its 15s hold —
+one renderer, two entry points, so the post-landing render can never drift from the
+non-landing one.
 
 `mode: restart` is the reason this timing lives in HA rather than in a backgrounded `sleep`
 on the laptop: a new event arriving mid-fade cancels the pending fade cleanly and for free,
@@ -276,7 +328,8 @@ holds the shimmer in hardware until told otherwise. This is why `working` needs 
 those bulbs and drives the pulse from HA with two commands per cycle.
 
 `opal`, `glisten` and `sparkle` were compared live on the lamp at the real intended
-brightness (12%), and **`sparkle` is the pinned choice**. `candle`, `fire` and `prism` are
+brightness (12%), and **`opal` is the pinned choice** — it is the only one that holds blue
+(see "The light" above for the measurements). `candle`, `fire` and `prism` are
 unusable here — the first two force a warm palette, the third crawls through hues, and none
 can stay blue.
 
@@ -315,16 +368,76 @@ past its timeout, or emits garbage; and `slots.json` is written *before* rendere
 bad renderer cannot delay the Stream Deck.
 
 **homeassistant** — `script.beacon_render` and `input_boolean.beacon_enabled` added.
-**`scripts/refresh-entity-snapshot.sh` must be run first**: `light.hue_color_lamp_1` is
-currently *absent* from `tests/fixtures/entities.txt`, so referencing it would fail
-`test_entity_references` and block the deploy.
+`light.hue_color_lamp_1` is now present in `tests/fixtures/entities.txt` (it had to be
+added via `scripts/refresh-entity-snapshot.sh` before `test_entity_references` would accept
+it), so this is no longer a deploy blocker.
+
+## 8 — Live acceptance results (Task 7, 2026-08-13)
+
+`~/code/flightdeck/config/fleet.local.json` now carries `"renderers":
+["/Users/pk/code/beacon/bin/beacon-render"]` and `~/.beacon/config.json` (mode `0600`) holds
+the real `ha_url`/token. The merge was verified via `fleetlib.load_config()`.
+
+**§2's `SessionEnd` budget claim, measured.** `time (cat sessionend.json | fleet-emit
+SessionEnd)` end-to-end (`fleet-emit → fleet-reconcile → beacon-render`, dispatch itself
+still detached) across 10 runs: **min 0.215s, max 0.438s, mean ≈0.32s**, against the shared
+1.5s budget — roughly 3-4x headroom even at the slowest observed run. The concern in §2 does
+not materialize in practice; three Python interpreter startups on this hardware cost well
+under half the budget.
+
+**Effect-driven states (`working`/`opal`, `failed`/`fire`) do not read back the requested
+RGB.** Confirmed live: once the Hue effect is active, `rgb_color`/`brightness` reported by
+`light.hue_color_lamp_1` reflect the *effect's own* palette, not the values the service call
+passed — stable and repeatable for the working shimmer, mildly flickering (215-255) for `fire`. This
+matches scripts.yaml's own comment on `fire` ("forces its own warm palette and cannot hold
+an arbitrary colour"), so it is bulb behaviour, not a pipeline defect — but it means
+`rgb_color` is not a meaningful assertion for those two states; `effect` is the reliable
+signal. Static states (`blocked`, the green landing, `idle`/off) reported colour close to but
+not pixel-identical to the requested value (Hue's RGB→xy→RGB round trip through the bridge),
+which is expected gamut rounding.
+
+**Confound discovered during testing, worth flagging for any future live-poke session:**
+this task's own Claude Code session, and flightdeck's install, mean *this very session* is
+itself one of the live sessions flightdeck tracks. Once the renderer was registered (§3
+above), any real `SessionStart`/`UserPromptSubmit`/`Notification`/`Stop`/`SessionEnd` firing
+on this session or on any other live session races with and can overwrite synthetic
+stdin-piped tests against `beacon-render`, because both paths share `~/.beacon/last.json` and
+the same lamp. Worked around by temporarily setting `"renderers": []` while driving the
+Step-4 synthetic snapshots directly through `bin/beacon-render` (which bypasses
+`fleet-reconcile` entirely and needs no such isolation), then restoring the real renderer
+list before the Step-6 timing measurement, which specifically needed the full live chain.
+
+**Separate concern, NOT caused by this task and NOT resolved by it:** during Step 6,
+`~/.fleet/sessions/P1.json` .. `P6.json` appeared (repos `alpha`..`foxtrot`, one `state:
+"failed"`) — clearly a manual/concurrent probe of the Stream Deck overflow indicator by
+someone else, not a bats fixture (no isolation leak; `reconcile.bats`/`emit.bats` properly
+scope `FLEET_HOME` to a tmpdir) and not created by this task. All six carry `"pid": 0`, and
+`fleet-reap` is deliberately conservative about pid 0 ("unknown is never reaped" —
+`bin/fleet-reap`), so **these will not self-clean** and will keep folding the real fleet to
+`base: "failed"` for as long as they exist. They did not light the lamp during this task only
+because `input_boolean.beacon_enabled` was off at the time they were folded in. The moment
+someone flips that toggle on, the lamp will show red/fire immediately and misleadingly until
+`~/.fleet/sessions/P{1..6}.json` are removed. Left untouched here deliberately — they look
+like another session's in-progress work, not abandoned junk, so deleting them was judged
+out of scope for this task. Flagged for the human to clear before relying on the `failed`
+state reading true. **Update:** by the end of this task the six files were gone again
+(`~/.fleet/sessions/` back to just the two real sessions) — whoever created them cleaned up
+after themselves, confirming this was transient concurrent activity rather than abandoned
+state. No action was needed after all, but the race window above (a stray `failed`/`blocked`
+session able to light the real lamp the instant `beacon_enabled` goes on) is real and worth
+remembering for next time.
 
 ## Deferred
 
-### `failed` — red flame (agreed treatment, deferred implementation)
+### `failed` — red flame (built)
 
 A fifth state meaning **"come back to the terminal and restart something."** Agreed in
-design, deliberately out of v1 so it does not gate the first working lamp. When built:
+design, originally deliberately out of v1 so it did not gate the first working lamp — but
+**`failed` WAS built into v1** once `bin/fleet-fail` shipped mid-build (see "Changed during
+implementation" under Palette, above). Only *automatic* detection of a died-on-an-API-error
+turn (`StopFailure`) remains deferred; see "Known gap" below. What follows is the treatment
+as built, kept here rather than moved up because the surrounding narrative (why it was
+agreed, why the deferral briefly existed) is still useful context.
 
 **Treatment: red flame.** Hue's native `fire` effect on red. `fire` was disqualified for
 `working` precisely because it forces its own warm palette and cannot hold blue — which is
@@ -338,7 +451,7 @@ and red solid are weak neighbours across a dim room. There is house precedent fo
 motion meaning trouble: HA §51 "Night Lights Red Beacon" breathes slow red while the alarm
 is triggered. A flame is distinct from that breathe, so the two do not collide.
 
-**Semantics when built:**
+**Semantics (as built):**
 
 - A **level, not an edge** — unlike the green landing. Red persists until dealt with,
   cleared by the next `UserPromptSubmit` (→ `working`) or `SessionEnd` (→ gone).
@@ -348,11 +461,13 @@ is triggered. A flame is distinct from that breathe, so the two do not collide.
   no exceptions. A turn that died at 3am is still dead at 7am, and will show red the moment
   Good Morning clears the flag. Nothing wakes the house.
 
-**Prerequisites, both outside this repo:**
+**What's still deferred: automatic detection.** `bin/fleet-fail` sets `state: "failed"` by
+hand, from the Stream Deck. Nothing yet sets it *automatically* when a turn dies on an API
+error. Prerequisites for that, both outside this repo:
 
 1. **flightdeck must emit it.** `fleet-emit`'s `EVENT_STATES` maps five events;
-   `StopFailure` is not one of them. Adding it also gives the Stream Deck red keys, using
-   the `#B42318` already sitting unused in `fleet.json`.
+   `StopFailure` is not one of them. Adding it would also give the Stream Deck red keys
+   automatically, using the `#B42318` already sitting unused in `fleet.json`.
 2. **`StopFailure` must be verified empirically first.** `docs/hook-contract.md` confirmed
    five events against CLI v2.1.232; `StopFailure` was not among them. The published docs
    describe it, but those same docs disagree with the observed payloads on two field names
