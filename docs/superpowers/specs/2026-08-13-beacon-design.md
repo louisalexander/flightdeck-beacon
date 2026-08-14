@@ -319,6 +319,61 @@ bad renderer cannot delay the Stream Deck.
 currently *absent* from `tests/fixtures/entities.txt`, so referencing it would fail
 `test_entity_references` and block the deploy.
 
+## 8 — Live acceptance results (Task 7, 2026-08-13)
+
+`~/code/flightdeck/config/fleet.local.json` now carries `"renderers":
+["/Users/pk/code/beacon/bin/beacon-render"]` and `~/.beacon/config.json` (mode `0600`) holds
+the real `ha_url`/token. The merge was verified via `fleetlib.load_config()`.
+
+**§2's `SessionEnd` budget claim, measured.** `time (cat sessionend.json | fleet-emit
+SessionEnd)` end-to-end (`fleet-emit → fleet-reconcile → beacon-render`, dispatch itself
+still detached) across 10 runs: **min 0.215s, max 0.438s, mean ≈0.32s**, against the shared
+1.5s budget — roughly 3-4x headroom even at the slowest observed run. The concern in §2 does
+not materialize in practice; three Python interpreter startups on this hardware cost well
+under half the budget.
+
+**Effect-driven states (`working`/`sparkle`, `failed`/`fire`) do not read back the requested
+RGB.** Confirmed live: once the Hue effect is active, `rgb_color`/`brightness` reported by
+`light.hue_color_lamp_1` reflect the *effect's own* palette, not the values the service call
+passed — stable and repeatable for `sparkle`, mildly flickering (215-255) for `fire`. This
+matches scripts.yaml's own comment on `fire` ("forces its own warm palette and cannot hold
+an arbitrary colour"), so it is bulb behaviour, not a pipeline defect — but it means
+`rgb_color` is not a meaningful assertion for those two states; `effect` is the reliable
+signal. Static states (`blocked`, the green landing, `idle`/off) reported colour close to but
+not pixel-identical to the requested value (Hue's RGB→xy→RGB round trip through the bridge),
+which is expected gamut rounding.
+
+**Confound discovered during testing, worth flagging for any future live-poke session:**
+this task's own Claude Code session, and flightdeck's install, mean *this very session* is
+itself one of the live sessions flightdeck tracks. Once the renderer was registered (§3
+above), any real `SessionStart`/`UserPromptSubmit`/`Notification`/`Stop`/`SessionEnd` firing
+on this session or on any other live session races with and can overwrite synthetic
+stdin-piped tests against `beacon-render`, because both paths share `~/.beacon/last.json` and
+the same lamp. Worked around by temporarily setting `"renderers": []` while driving the
+Step-4 synthetic snapshots directly through `bin/beacon-render` (which bypasses
+`fleet-reconcile` entirely and needs no such isolation), then restoring the real renderer
+list before the Step-6 timing measurement, which specifically needed the full live chain.
+
+**Separate concern, NOT caused by this task and NOT resolved by it:** during Step 6,
+`~/.fleet/sessions/P1.json` .. `P6.json` appeared (repos `alpha`..`foxtrot`, one `state:
+"failed"`) — clearly a manual/concurrent probe of the Stream Deck overflow indicator by
+someone else, not a bats fixture (no isolation leak; `reconcile.bats`/`emit.bats` properly
+scope `FLEET_HOME` to a tmpdir) and not created by this task. All six carry `"pid": 0`, and
+`fleet-reap` is deliberately conservative about pid 0 ("unknown is never reaped" —
+`bin/fleet-reap`), so **these will not self-clean** and will keep folding the real fleet to
+`base: "failed"` for as long as they exist. They did not light the lamp during this task only
+because `input_boolean.beacon_enabled` was off at the time they were folded in. The moment
+someone flips that toggle on, the lamp will show red/fire immediately and misleadingly until
+`~/.fleet/sessions/P{1..6}.json` are removed. Left untouched here deliberately — they look
+like another session's in-progress work, not abandoned junk, so deleting them was judged
+out of scope for this task. Flagged for the human to clear before relying on the `failed`
+state reading true. **Update:** by the end of this task the six files were gone again
+(`~/.fleet/sessions/` back to just the two real sessions) — whoever created them cleaned up
+after themselves, confirming this was transient concurrent activity rather than abandoned
+state. No action was needed after all, but the race window above (a stray `failed`/`blocked`
+session able to light the real lamp the instant `beacon_enabled` goes on) is real and worth
+remembering for next time.
+
 ## Deferred
 
 ### `failed` — red flame (agreed treatment, deferred implementation)
