@@ -134,9 +134,13 @@ fork the colours.
 apply to it verbatim:
 
 - **Python 3.9 syntax, standard library only.** No third-party packages, no venv. 3.9 is
-  the floor because `fleet-reap` runs under **launchd**, whose `PATH` resolves
-  CommandLineTools 3.9.6 rather than the Homebrew 3.13 an interactive shell gets — and reap
-  calls reconcile, which calls `beacon-render`. Avoid `match` and `X | Y` annotations.
+  the floor because of `beacon-render` itself, not `fleet-reap`: `fleet-reap`'s own launchd
+  plist explicitly invokes Homebrew's `python3.13`, so checking the plist and seeing 3.13
+  will (wrongly) suggest this constraint can be relaxed. The real cause is one hop further
+  down the chain — `bin/beacon-render`'s own `#!/usr/bin/env python3` shebang, resolved
+  fresh when it is spawned as a subprocess of `fleet-reconcile`. Under launchd's inherited
+  `PATH` (unlike an interactive shell's), `env python3` resolves to CommandLineTools'
+  `/usr/bin/python3` (3.9.6), not Homebrew's 3.13. Avoid `match` and `X | Y` annotations.
 - **Never write to stdout, always exit 0.** `beacon-render` is reachable from a Claude Code
   hook. A bug in it must never break a real agent. Errors go to a log file only.
 - **All writes atomic** — temp file in the same directory, then `os.replace()`.
@@ -223,14 +227,16 @@ guarantee extends outward across this seam.
 `bin/beacon-render` is a pure function wrapped in thin IO.
 
 ```
-fold(sessions, prev) -> (base, landed, next_prev)
+fold(sessions, prev) -> (base, landed, next_prev, changed)
 
+  failed   = any(s.state == "failed")
   blocked  = any(s.state == "blocked")
   working  = any(s.state == "working")
   done_set = {s.session_id for s in sessions if s.state == "done"}
 
-  base   = "blocked" if blocked else "working" if working else "idle"
-  landed = bool(done_set - prev.done_set) and base != "blocked"
+  base    = "failed" if failed else "blocked" if blocked else "working" if working else "idle"
+  landed  = bool(done_set - prev.done_set) and base not in ("blocked", "failed")
+  changed = landed or base != prev.base
 ```
 
 Two decisions are encoded here and both matter:
@@ -241,9 +247,10 @@ Two decisions are encoded here and both matter:
 finished"). Testing `done_set` for non-emptiness would re-fire green on every 15s reap tick
 forever. Only a session *entering* the done set counts.
 
-**`and base != "blocked"`** implements the agreed priority — amber outranks green. When
-some other agent is stuck on you, a landing elsewhere does not steal the lamp, because only
-one of those two things needs your hands.
+**`and base not in ("blocked", "failed")`** implements the agreed priority — amber and red
+both outrank green. When some other agent is stuck on you, or something has broken, a
+landing elsewhere does not steal the lamp, because those are the only two things that need
+your hands.
 
 Green must still fire while another session is `working` — that was the chosen concurrency
 semantic: the lamp returns to blue after the fade if anything is still in flight, and to
@@ -264,21 +271,31 @@ across all hooks. Nothing on that path may block on the network.
 
 ## 3 — The HA renderer
 
-`script.beacon_render` in `scripts.yaml`, `mode: restart`, fields `base`
-(`idle|working|blocked`) and `landed` (bool).
+Two scripts in `scripts.yaml`, both `mode: restart`.
+
+`script.beacon_render` is the entry point `beacon-render` calls. Fields: `base`
+(`idle|working|blocked|failed`), `landed` (bool), `rgb` (the base state's colour) and
+`rgb_done` (the landing flash's colour) — the last two are how the snapshot's palette rides
+along on the service call rather than being hardcoded in HA.
 
 ```
 1. input_boolean.beacon_enabled off  OR  input_boolean.sleeping on
      → light.turn_off, stop.
 2. landed
-     → green, transition 0, full brightness
+     → green (rgb_done), transition 0, full brightness
      → delay 15s
-     → render base with transition 15
-3. else render base with transition 2:
+     → script.beacon_paint(base, rgb, transition 15)
+3. else script.beacon_paint(base, rgb, transition 2):
+     failed  → red,    ~45%, `fire` effect
      blocked → amber,  ~35%, solid
      working → blue,   ~12%, shimmer (see §4)
      idle    → light.turn_off
 ```
+
+`script.beacon_paint` is the shared base-state renderer, split out of `beacon_render`
+because the landing branch has to fall through to *exactly* this logic after its 15s hold —
+one renderer, two entry points, so the post-landing render can never drift from the
+non-landing one.
 
 `mode: restart` is the reason this timing lives in HA rather than in a backgrounded `sleep`
 on the laptop: a new event arriving mid-fade cancels the pending fade cleanly and for free,
@@ -338,9 +355,9 @@ past its timeout, or emits garbage; and `slots.json` is written *before* rendere
 bad renderer cannot delay the Stream Deck.
 
 **homeassistant** — `script.beacon_render` and `input_boolean.beacon_enabled` added.
-**`scripts/refresh-entity-snapshot.sh` must be run first**: `light.hue_color_lamp_1` is
-currently *absent* from `tests/fixtures/entities.txt`, so referencing it would fail
-`test_entity_references` and block the deploy.
+`light.hue_color_lamp_1` is now present in `tests/fixtures/entities.txt` (it had to be
+added via `scripts/refresh-entity-snapshot.sh` before `test_entity_references` would accept
+it), so this is no longer a deploy blocker.
 
 ## 8 — Live acceptance results (Task 7, 2026-08-13)
 
@@ -399,10 +416,15 @@ remembering for next time.
 
 ## Deferred
 
-### `failed` — red flame (agreed treatment, deferred implementation)
+### `failed` — red flame (built)
 
 A fifth state meaning **"come back to the terminal and restart something."** Agreed in
-design, deliberately out of v1 so it does not gate the first working lamp. When built:
+design, originally deliberately out of v1 so it did not gate the first working lamp — but
+**`failed` WAS built into v1** once `bin/fleet-fail` shipped mid-build (see "Changed during
+implementation" under Palette, above). Only *automatic* detection of a died-on-an-API-error
+turn (`StopFailure`) remains deferred; see "Known gap" below. What follows is the treatment
+as built, kept here rather than moved up because the surrounding narrative (why it was
+agreed, why the deferral briefly existed) is still useful context.
 
 **Treatment: red flame.** Hue's native `fire` effect on red. `fire` was disqualified for
 `working` precisely because it forces its own warm palette and cannot hold blue — which is
@@ -416,7 +438,7 @@ and red solid are weak neighbours across a dim room. There is house precedent fo
 motion meaning trouble: HA §51 "Night Lights Red Beacon" breathes slow red while the alarm
 is triggered. A flame is distinct from that breathe, so the two do not collide.
 
-**Semantics when built:**
+**Semantics (as built):**
 
 - A **level, not an edge** — unlike the green landing. Red persists until dealt with,
   cleared by the next `UserPromptSubmit` (→ `working`) or `SessionEnd` (→ gone).
@@ -426,11 +448,13 @@ is triggered. A flame is distinct from that breathe, so the two do not collide.
   no exceptions. A turn that died at 3am is still dead at 7am, and will show red the moment
   Good Morning clears the flag. Nothing wakes the house.
 
-**Prerequisites, both outside this repo:**
+**What's still deferred: automatic detection.** `bin/fleet-fail` sets `state: "failed"` by
+hand, from the Stream Deck. Nothing yet sets it *automatically* when a turn dies on an API
+error. Prerequisites for that, both outside this repo:
 
 1. **flightdeck must emit it.** `fleet-emit`'s `EVENT_STATES` maps five events;
-   `StopFailure` is not one of them. Adding it also gives the Stream Deck red keys, using
-   the `#B42318` already sitting unused in `fleet.json`.
+   `StopFailure` is not one of them. Adding it would also give the Stream Deck red keys
+   automatically, using the `#B42318` already sitting unused in `fleet.json`.
 2. **`StopFailure` must be verified empirically first.** `docs/hook-contract.md` confirmed
    five events against CLI v2.1.232; `StopFailure` was not among them. The published docs
    describe it, but those same docs disagree with the observed payloads on two field names
