@@ -230,10 +230,10 @@ holds the shimmer in hardware until told otherwise. This is why `working` needs 
 `repeat/while` automation — unlike HA §51's red breathe, which predates effect support on
 those bulbs and drives the pulse from HA with two commands per cycle.
 
-The candidates were compared live on the lamp at the real intended brightness (12%):
-`opal`, `glisten`, `sparkle`. **Pinned choice: see below.** `candle`, `fire` and `prism`
-are unusable here — the first two force a warm palette, the third crawls through hues, and
-none can stay blue.
+`opal`, `glisten` and `sparkle` were compared live on the lamp at the real intended
+brightness (12%), and **`sparkle` is the pinned choice**. `candle`, `fire` and `prism` are
+unusable here — the first two force a warm palette, the third crawls through hues, and none
+can stay blue.
 
 Because the capability is now confirmed present, the script applies the effect directly
 rather than guarding it behind a `choose` on `effect_list`. The one caveat is the reload
