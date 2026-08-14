@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""flightdeck renderer: paints fleet state onto the Beacon Hue lamp via Home Assistant.
+
+Reads a fleet snapshot as JSON on stdin (see docs/superpowers/specs for the
+contract), folds it to one lamp state, and calls Home Assistant only when
+that state actually changed.
+
+MUST ALWAYS EXIT 0 AND NEVER WRITE TO STDOUT. It is reachable from a Claude
+Code hook (fleet-emit -> fleet-reconcile -> here) and from launchd
+(fleet-reap -> fleet-reconcile -> here). A bug here must never break a real
+agent. Errors go to ~/.beacon/beacon.log only.
+"""
+
+import json
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import beaconlib  # noqa: E402
+
+
+def dispatch(base, landed, states):
+    """Sends the desired state onward. Replaced with real transport in Task 4.
+
+    `states` is flightdeck's palette, passed straight through from the
+    snapshot so colours have exactly one home (flightdeck's config/fleet.json)
+    rather than being duplicated into the Home Assistant scripts.
+    """
+    dry = os.environ.get("BEACON_DRY_RUN")
+    if dry:
+        with open(dry, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps({"base": base, "landed": landed},
+                                    separators=(",", ":")) + "\n")
+        return
+
+
+def run():
+    try:
+        raw = sys.stdin.read()
+    except Exception as err:
+        beaconlib.log("render: could not read stdin: {}".format(err))
+        return
+
+    try:
+        snapshot = json.loads(raw)
+        if not isinstance(snapshot, dict):
+            raise ValueError("snapshot is not an object")
+    except Exception as err:
+        beaconlib.log("render: unparseable snapshot: {}".format(err))
+        return
+
+    sessions = snapshot.get("sessions")
+    if not isinstance(sessions, list):
+        sessions = []
+    states = snapshot.get("states")
+    if not isinstance(states, dict):
+        states = {}
+
+    prev = beaconlib.read_json(beaconlib.state_path(), {})
+    base, landed, next_prev, changed = beaconlib.fold(sessions, prev)
+
+    if not changed:
+        return
+
+    # Persist before dispatching. Dispatch is fire-and-forget, so success is
+    # unknowable; persisting regardless means a failed call leaves the lamp
+    # stale until the next real state change rather than re-firing forever.
+    try:
+        beaconlib.write_json_atomic(beaconlib.state_path(), next_prev)
+    except Exception as err:
+        beaconlib.log("render: could not persist state: {}".format(err))
+
+    try:
+        dispatch(base, landed, states)
+    except Exception as err:
+        beaconlib.log("render: dispatch failed: {}".format(err))
+
+
+if __name__ == "__main__":
+    try:
+        run()
+    except Exception as err:            # noqa: BLE001 -- the exit-0 guarantee
+        beaconlib.log("render: unhandled {!r}".format(err))
+    sys.exit(0)
