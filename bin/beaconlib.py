@@ -179,6 +179,15 @@ def ensure_headers_file(config):
     The token goes in a file rather than in argv because `ps` is world
     readable: `curl -H "Authorization: Bearer <token>"` would leak a
     long-lived Home Assistant token to every process on the machine.
+
+    The write itself uses the same temp-file-then-os.replace() pattern as
+    write_json_atomic(), rather than a plain truncating write, because
+    multiple beacon-render processes can run concurrently (several Claude
+    Code sessions ending at once each drive their own
+    SessionEnd -> fleet-emit -> fleet-reconcile -> beacon-render). A
+    non-atomic write leaves a window where a concurrent curl reader can open
+    a truncated or partial header file, send no valid Authorization header,
+    and silently drop that one Home Assistant dispatch.
     """
     path = curl_headers_path()
     wanted = "Authorization: Bearer {}\nContent-Type: application/json\n".format(
@@ -191,10 +200,17 @@ def ensure_headers_file(config):
         existing = None
     if existing != wanted:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        fd, tmp = tempfile.mkstemp(dir=str(path.parent), prefix=".{}.".format(path.name))
         try:
-            os.write(fd, wanted.encode("utf-8"))
-        finally:
-            os.close(fd)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(wanted)
+            os.replace(tmp, str(path))
+        except Exception:
+            try:
+                os.unlink(tmp)
+            except Exception:
+                pass
+            raise
     os.chmod(str(path), 0o600)
     return path
