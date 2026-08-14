@@ -28,6 +28,11 @@ last_dispatch() {
   [ "$(dispatched)" = "1" ]
   [[ "$(last_dispatch)" == *'"base":"working"'* ]]
   [[ "$(last_dispatch)" == *'"landed":false'* ]]
+  # I5: the dry-run seam must record the SAME payload production sends
+  # (beaconlib.service_body), colour included -- not a hand-rolled subset
+  # that silently drops rgb/rgb_done. The snapshot's palette sets "working"
+  # to #1256A3, which must resolve to [18,86,163] here.
+  [[ "$(last_dispatch)" == *'"rgb":[18,86,163]'* ]]
 }
 
 @test "NO-OP SUPPRESSION: an unchanged snapshot dispatches exactly once" {
@@ -45,6 +50,21 @@ last_dispatch() {
   [[ "$(last_dispatch)" == *'"landed":true'* ]]
   snap "$s" | "$BIN/beacon-render"
   [ "$(dispatched)" = "1" ]
+}
+
+@test "C1: a landing re-fires after an intermediate working tick, while a second session stays working throughout" {
+  # Traces the C1 finding: A goes done -> working -> done again, while B stays
+  # "working" the whole time so `base` never changes. Both landings must
+  # dispatch. Pre-fix, persistence was gated on `changed`, so the middle tick
+  # (changed=false) never wrote the now-empty done set; the second "done"
+  # then saw a stale prev_done still containing "A" and silently failed to
+  # land a second time.
+  snap '[{"session_id":"A","state":"done"},{"session_id":"B","state":"working"}]' | "$BIN/beacon-render"
+  snap '[{"session_id":"A","state":"working"},{"session_id":"B","state":"working"}]' | "$BIN/beacon-render"
+  snap '[{"session_id":"A","state":"done"},{"session_id":"B","state":"working"}]' | "$BIN/beacon-render"
+  [ "$(dispatched)" = "2" ]
+  run bash -c "grep -c '\"landed\":true' '$BEACON_DRY_RUN'"
+  [ "$output" = "2" ]
 }
 
 @test "state persists to last.json between invocations" {

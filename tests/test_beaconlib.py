@@ -126,6 +126,19 @@ class TestConfig(BeaconlibTestCase):
             encoding="utf-8")
         self.assertEqual(beaconlib.load_config()["ha_url"], "http://ha.local:8123")
 
+    def test_load_config_locks_down_the_file_mode_to_0600(self):
+        # M12: config.json holds the plaintext HA token, same as curl-headers,
+        # but nothing repaired its mode before this. Best-effort and must
+        # never raise -- this runs on the hook path.
+        self.home.mkdir(parents=True, exist_ok=True)
+        beaconlib.config_path().write_text(
+            json.dumps({"ha_url": "http://ha.local:8123", "token": "t"}),
+            encoding="utf-8")
+        os.chmod(str(beaconlib.config_path()), 0o644)
+        beaconlib.load_config()
+        mode = stat.S_IMODE(os.stat(str(beaconlib.config_path())).st_mode)
+        self.assertEqual(mode, 0o600, oct(mode))
+
 
 def s(session_id, state):
     """Shorthand for a session entry in the fleet snapshot."""
@@ -230,6 +243,47 @@ class TestFold(unittest.TestCase):
         before = json.dumps([sessions, previous], sort_keys=True)
         beaconlib.fold(sessions, previous)
         self.assertEqual(json.dumps([sessions, previous], sort_keys=True), before)
+
+    def test_c1_a_second_landing_survives_an_intermediate_working_tick_while_another_session_stays_busy(self):
+        """Regression for C1.
+
+        A session going done -> working -> done again, while a second session
+        stays "working" throughout (so `base` never changes), must land the
+        SECOND time too. That requires persisting `next_prev` whenever it
+        differs from `prev`, independent of whether `changed` is True -- the
+        rule bin/beacon-render's run() now follows.
+
+        If persistence were instead gated on `changed` alone (the pre-fix
+        behaviour: only write state when we are also about to dispatch), the
+        intermediate "A working" tick has changed=False even though its
+        next_prev drops "A" from the done set. That write would be skipped,
+        prev_done would stay stale at {"A"}, and the second "A done" tick
+        would compute done_ids - prev_done == {} -- no landing, forever,
+        exactly as traced in the C1 finding.
+
+        fold() itself is pure and was never the bug; this test drives it with
+        the FIXED persist rule to prove the rule, not fold(), is what fixes
+        C1. The end-to-end proof that the shipped bug existed lives in
+        tests/render.bats (the equivalent scenario against the real
+        bin/beacon-render binary, pre-fix).
+        """
+        state = {}
+
+        def tick(sessions):
+            nonlocal state
+            base, landed, next_prev, changed = beaconlib.fold(sessions, state)
+            if next_prev != state:
+                state = next_prev
+            return landed
+
+        self.assertFalse(tick([s("B", "working")]))
+        self.assertFalse(tick([s("A", "working"), s("B", "working")]))
+        self.assertTrue(tick([s("A", "done"), s("B", "working")]),
+                         "first landing must fire")
+        self.assertFalse(tick([s("A", "working"), s("B", "working")]),
+                          "no landing while A is merely back to working")
+        self.assertTrue(tick([s("A", "done"), s("B", "working")]),
+                         "SECOND landing must also fire -- this is C1")
 
     def test_a_landing_then_a_reap_settles_without_re_firing(self):
         # The exact sequence the 15s reap tick produces after a turn ends.

@@ -70,7 +70,16 @@ def write_json_atomic(path, obj):
 
 def load_config():
     config = read_json(config_path(), {})
-    return config if isinstance(config, dict) else {}
+    if not isinstance(config, dict):
+        return {}
+    # Best-effort: config.json holds the plaintext HA token, same as
+    # curl-headers, but unlike curl-headers nothing else here repairs its
+    # mode. This is on the hook path, so it must never raise.
+    try:
+        os.chmod(str(config_path()), 0o600)
+    except Exception:
+        pass
+    return config
 
 # --- the fold --------------------------------------------------------------
 
