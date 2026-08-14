@@ -1,8 +1,8 @@
 # Beacon — Re-assert on Demand — Design
 
 **Date:** 2026-08-14
-**Status:** Built as `4805279` in the `homeassistant` repo. All tiers pass. **Not deployed** —
-the push restarts the live house.
+**Status:** Built and **deployed** 2026-08-14 (`4805279`, loop-guard fix `8a4f91f`). All tiers
+pass; 5 of 7 live-acceptance cases verified on the lamp.
 **Extends:** `docs/superpowers/specs/2026-08-13-beacon-design.md`
 **Repos touched:** `homeassistant` only. No change to `beacon` or `flightdeck`.
 
@@ -141,18 +141,39 @@ helpers mid-restore and fail on precisely the restart this is meant to recover f
 
 #### Loop guard
 
-`beacon_paint` turns the light on. That is a light turning on, which is this automation's
-own trigger. Two independent guards, either sufficient:
+`beacon_render` turns the light on. That is a light turning on, which is this automation's
+own trigger.
 
-1. **Context.** Condition on `trigger.to_state.context.parent_id is none`. A human toggle —
-   HA UI, the Hue app, a wall switch via the bridge — carries no parent context. Anything
-   `beacon_paint` does carries a parent chaining back to the script.
-2. **Transition.** Trigger on `from: "off"` `to: "on"`, not bare `to: "on"`. `beacon_paint`
-   painting a lamp that is already on produces no `off` → `on` edge, and an attribute-only
-   change (colour, brightness) cannot trigger it either.
+> **This section originally specified the wrong guard, and live acceptance caught it
+> destroying the green landing.** The original claim was that a script-driven light change
+> is distinguishable from a human toggle by `trigger.to_state.context.parent_id is none`.
+> **It is not.** Home Assistant *propagates* a script's context through the service calls it
+> makes, so when `beacon_render` paints the lamp the resulting `off` → `on` change carries
+> `beacon_render`'s own context id with `parent_id` **still `none`** — passing that test
+> exactly as a human toggle does. Measured: firing a landing with the bulb off, green never
+> appeared, and the lamp went straight to base-state blue within ~1.5s.
 
-Both are specified. Guard 1 is the correctness argument; guard 2 also stops attribute churn
-from firing the automation needlessly.
+Three guards, in order of what they actually do:
+
+1. **Scripts idle — this is the real guard.** Condition on `script.beacon_render` *and*
+   `script.beacon_paint` both being `off`. The landing branch holds `beacon_render` `on` for
+   its full 15s (green → delay 15s → `beacon_paint`), so this is deterministic exactly where
+   it matters.
+2. **Transition.** Trigger on `from: "off"` `to: "on"`, not bare `to: "on"`. Painting a lamp
+   that is already on produces no `off` → `on` edge, and attribute-only changes (colour,
+   brightness) cannot trigger it either.
+3. **Context.** Retained, but demoted to what it genuinely does: dropping echoes that *do*
+   carry a parent context, i.e. an automation or script that chained into a light change and
+   got a fresh context. Not sufficient alone, and its comment in `automations.yaml` says so
+   explicitly so it is not mistaken for the loop guard again.
+
+**Accepted race.** Outside a landing, guard 1 can lose to a fast `beacon_render`. That is
+deliberate: the automation would repaint the mirror's base state, which is the state
+`beacon_render` just painted from the same values in the same run — idempotent and
+invisible. Only the landing is non-idempotent, and the 15s hold covers it deterministically.
+
+**Accepted consequence.** Flick the lamp on during a landing and the re-assert is skipped.
+Correct: `beacon_render` paints the true base state itself when its hold expires.
 
 #### The start delay
 
@@ -195,16 +216,26 @@ after deploy to move them into the real snapshot — the mechanism the v1 build 
 
 ### Live acceptance
 
-Automated tiers cannot prove any of this; every case ends in "look at the lamp."
+Automated tiers cannot prove any of this; every case ends in "look at the lamp." Results
+from the 2026-08-14 run against the deployed instance:
 
-1. Fleet working, lamp off → turn on by hand → **pale blue-lavender, opal**, not warm white.
-2. Fleet idle, lamp off → turn on by hand → **snaps back off** within ~1s.
-3. Fleet working → `beacon_enabled` off (lamp goes dark) → back on → **blue returns immediately.**
-4. Fleet working → `sleeping` on (dark) → `sleeping` off → **blue returns immediately.**
-5. Fleet working → restart HA → **blue returns**, not darkness.
-6. Land an agent → confirm 70% green still reads as unmistakably an event.
-7. Watch for 2 minutes with the fleet steady → **the lamp does not flicker or re-paint**. This
-   is the loop-guard test; a context-guard failure shows up here as a pulsing lamp.
+| # | Case | Result |
+|---|---|---|
+| 1 | Fleet working, lamp off → turn on by hand | **PASS** — `opal`, `[219,185,255]`, not warm white |
+| 2 | Fleet idle, lamp off → turn on by hand | **PASS** — snaps back off |
+| 3 | `beacon_enabled` off → on | **PASS** — dark, then blue returns immediately |
+| 4 | `sleeping` on → off | **not run** — see below |
+| 5 | Restart HA → blue returns | **partial** — the deploy restart left the lamp correct, but `beacon_render` also fired in the same window, so the `ha_start` path alone is unproven |
+| 6 | Land an agent → 70% green | **PASS after fix** — `[76,255,110]` at `bri=178` (= 70%), held, then faded to base |
+| 7 | 45s steady → no flicker | **PASS** — automation did not retrigger, lamp did not change |
+
+Case 6 **failed first** and is what exposed the loop-guard defect above: green never
+appeared at all, and the lamp went straight to base blue within ~1.5s.
+
+Case 4 was deliberately not run. Toggling `input_boolean.sleeping` on the live instance
+drives real Good Night / Good Morning house automations well outside Beacon's blast radius,
+and the mechanism is identical to case 3, which passed. Worth confirming incidentally the
+next time the house actually goes to sleep.
 
 ## Failure modes
 
