@@ -71,3 +71,52 @@ def write_json_atomic(path, obj):
 def load_config():
     config = read_json(config_path(), {})
     return config if isinstance(config, dict) else {}
+
+# --- the fold --------------------------------------------------------------
+
+PRIORITY = ("failed", "blocked", "working")
+
+def fold(sessions, prev):
+    """Folds every live session into one lamp state.
+
+    Returns (base, landed, next_prev, changed).
+
+    Priority is failed > blocked > working > idle. "failed" is written by
+    flightdeck's bin/fleet-fail (sticky red, set by hand from the Stream
+    Deck) and MUST outrank everything: it is the only state that means
+    something is broken rather than merely pending. Note what happens if it
+    is left out of this tuple -- it falls through to "idle", which turns the
+    lamp OFF and reads as "everything landed" at exactly the wrong moment.
+
+    `landed` is edge-triggered off a SET DIFFERENCE, not off the done set
+    being non-empty. This is load-bearing: fleet-emit writes state "done" on
+    Stop and that file PERSISTS as done until the session's next event, so
+    "done" is a level while the green landing is an edge. A non-emptiness
+    test would re-fire green on every 15s reap tick, forever.
+
+    `and base != "blocked"` is the agreed priority -- amber outranks green.
+    A landing elsewhere must not steal the lamp from an agent that is
+    actually waiting on a human.
+    """
+    prev = prev if isinstance(prev, dict) else {}
+    prev_base = prev.get("base", "idle")
+    prev_done = set(prev.get("done") or [])
+
+    live = [s for s in sessions if isinstance(s, dict)]
+    states = set()
+    done_ids = set()
+    for session in live:
+        state = session.get("state", "idle")
+        states.add(state)
+        if state == "done" and session.get("session_id"):
+            done_ids.add(session["session_id"])
+
+    base = "idle"
+    for candidate in PRIORITY:
+        if candidate in states:
+            base = candidate
+            break
+
+    landed = bool(done_ids - prev_done) and base not in ("blocked", "failed")
+    changed = landed or base != prev_base
+    return base, landed, {"base": base, "done": sorted(done_ids)}, changed

@@ -127,5 +127,120 @@ class TestConfig(BeaconlibTestCase):
         self.assertEqual(beaconlib.load_config()["ha_url"], "http://ha.local:8123")
 
 
+def s(session_id, state):
+    """Shorthand for a session entry in the fleet snapshot."""
+    return {"session_id": session_id, "state": state}
+
+
+def prev(base="idle", done=()):
+    return {"base": base, "done": list(done)}
+
+
+class TestFold(unittest.TestCase):
+    """The truth table for the whole lamp.
+
+    Each case is (label, sessions, prev, expected_base, expected_landed,
+    expected_changed, expected_done).
+    """
+
+    CASES = [
+        ("nothing running is idle, and unchanged when already idle",
+         [], prev("idle"), "idle", False, False, []),
+
+        ("one working session turns the lamp blue",
+         [s("A", "working")], prev("idle"), "working", False, True, []),
+
+        ("blocked outranks working",
+         [s("A", "working"), s("B", "blocked")], prev("idle"),
+         "blocked", False, True, []),
+
+        ("FAILED OUTRANKS EVERYTHING: it is the only state meaning something broke",
+         [s("A", "working"), s("B", "blocked"), s("C", "failed")], prev("idle"),
+         "failed", False, True, []),
+
+        ("a failed session alone does NOT fall through to idle and go dark",
+         [s("A", "failed")], prev("working"), "failed", False, True, []),
+
+        ("a landing is suppressed under failed, as it is under blocked",
+         [s("A", "done"), s("B", "failed")], prev("idle"),
+         "failed", False, True, ["A"]),
+
+        ("clearing a failure back to idle returns the lamp to off",
+         [s("A", "idle")], prev("failed"), "idle", False, True, []),
+
+        ("a newly done session lands, base idle when nothing else runs",
+         [s("A", "done")], prev("working"), "idle", True, True, ["A"]),
+
+        ("LANDING IS AN EDGE: the same done session does not re-land",
+         [s("A", "done")], prev("idle", ["A"]), "idle", False, False, ["A"]),
+
+        ("a landing fires even while another session still works",
+         [s("A", "done"), s("B", "working")], prev("working"),
+         "working", True, True, ["A"]),
+
+        ("AMBER OUTRANKS GREEN: a landing is suppressed while any session is blocked",
+         [s("A", "done"), s("B", "blocked")], prev("idle"),
+         "blocked", False, True, ["A"]),
+
+        ("two sessions landing at once is a single landing",
+         [s("A", "done"), s("B", "done")], prev("working"),
+         "idle", True, True, ["A", "B"]),
+
+        ("a second session landing while the first is still done lands again",
+         [s("A", "done"), s("B", "done")], prev("idle", ["A"]),
+         "idle", True, True, ["A", "B"]),
+
+        ("a session leaving done drops out of the done set",
+         [s("A", "working")], prev("idle", ["A"]), "working", False, True, []),
+
+        ("a reaped working session drops to idle, which is a change",
+         [], prev("working"), "idle", False, True, []),
+
+        ("a reaped done session is NOT a change; HA already ran the fade",
+         [], prev("idle", ["A"]), "idle", False, False, []),
+
+        ("an empty prev is treated as idle with nothing done",
+         [s("A", "working")], {}, "working", False, True, []),
+
+        ("junk entries and unknown states are ignored, not fatal",
+         [s("A", "working"), "junk", {"no_id": True}, s("C", "weird")],
+         prev("idle"), "working", False, True, []),
+
+        ("a done session with no session_id cannot land",
+         [{"state": "done"}], prev("idle"), "idle", False, False, []),
+    ]
+
+    def test_truth_table(self):
+        for case in self.CASES:
+            label, sessions, previous, want_base, want_landed, want_changed, want_done = case
+            with self.subTest(case=label):
+                base, landed, nxt, changed = beaconlib.fold(sessions, previous)
+                self.assertEqual(base, want_base, "base")
+                self.assertEqual(landed, want_landed, "landed")
+                self.assertEqual(changed, want_changed, "changed")
+                self.assertEqual(nxt["done"], want_done, "done")
+
+    def test_next_prev_is_json_serialisable_and_round_trips(self):
+        _, _, nxt, _ = beaconlib.fold([s("A", "done")], prev("working"))
+        self.assertEqual(json.loads(json.dumps(nxt)), nxt)
+
+    def test_fold_does_not_mutate_its_arguments(self):
+        sessions = [s("A", "done")]
+        previous = prev("working")
+        before = json.dumps([sessions, previous], sort_keys=True)
+        beaconlib.fold(sessions, previous)
+        self.assertEqual(json.dumps([sessions, previous], sort_keys=True), before)
+
+    def test_a_landing_then_a_reap_settles_without_re_firing(self):
+        # The exact sequence the 15s reap tick produces after a turn ends.
+        state = {}
+        base, landed, state, changed = beaconlib.fold([s("A", "done")], state)
+        self.assertEqual((base, landed, changed), ("idle", True, True))
+        base, landed, state, changed = beaconlib.fold([s("A", "done")], state)
+        self.assertEqual((base, landed, changed), ("idle", False, False))
+        base, landed, state, changed = beaconlib.fold([], state)
+        self.assertEqual((base, landed, changed), ("idle", False, False))
+
+
 if __name__ == "__main__":
     unittest.main()
