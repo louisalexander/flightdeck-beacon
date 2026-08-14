@@ -157,8 +157,11 @@ Three guards, in order of what they actually do:
 
 1. **Scripts idle — this is the real guard.** Condition on `script.beacon_render` *and*
    `script.beacon_paint` both being `off`. The landing branch holds `beacon_render` `on` for
-   its full 15s (green → delay 15s → `beacon_paint`), so this is deterministic exactly where
-   it matters.
+   its full 6s (green → delay 6s → `beacon_paint`), so this is deterministic exactly where
+   it matters. **That hold is now doing double duty** — it is both the landing's visual
+   dwell and this guard's window, so shortening it further trades directly against loop
+   safety. Below ~3s it becomes a race, and the failure mode is a landing that never
+   appears at all.
 2. **Transition.** Trigger on `from: "off"` `to: "on"`, not bare `to: "on"`. Painting a lamp
    that is already on produces no `off` → `on` edge, and attribute-only changes (colour,
    brightness) cannot trigger it either.
@@ -170,7 +173,7 @@ Three guards, in order of what they actually do:
 **Accepted race.** Outside a landing, guard 1 can lose to a fast `beacon_render`. That is
 deliberate: the automation would repaint the mirror's base state, which is the state
 `beacon_render` just painted from the same values in the same run — idempotent and
-invisible. Only the landing is non-idempotent, and the 15s hold covers it deterministically.
+invisible. Only the landing is non-idempotent, and the 6s hold covers it deterministically.
 
 **Accepted consequence.** Flick the lamp on during a landing and the re-assert is skipped.
 Correct: `beacon_render` paints the true base state itself when its hold expires.

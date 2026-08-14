@@ -97,14 +97,27 @@ effect in a single service call:
 `fire` being unable to hold an arbitrary colour disqualifies it here but makes it precisely
 right for the `failed` state, which wants a red flame.
 
-> **Readback is blind under an effect.** `light.hue_color_lamp_1`'s `rgb_color` does **not**
-> return the requested colour while an effect runs — it returns that effect's palette
-> constant. API readback therefore cannot verify the colour of an effect-driven state, and
-> **must never be used to compare effects**, which is exactly the mistake retracted above.
+> **Readback reports the colour the effect is actually running with.** This is the precise
+> version of the "readback is blind" rule, and the imprecise version is what caused the
+> retraction above.
 >
-> To verify an effect's real colour, query the Hue bridge directly:
-> `GET https://<bridge>/clip/v2/resource/light/<uuid>` returns
-> `effects_v2.status.parameters.color.xy`, which is the true value. Otherwise, use your eyes.
+> - Effect started **without** a colour (all that `light.turn_on` can do): the bulb runs the
+>   effect's *default palette*, and readback faithfully reports that. It looks like the
+>   readback is ignoring you. It isn't — the bulb genuinely is that colour, because your
+>   colour never arrived.
+> - Effect started **with** a colour (`effects_v2.action.parameters.color`, via
+>   `rest_command.beacon_sparkle`): readback returns the real value. Confirmed live —
+>   `working` reads `xy [0.1562, 0.1436]` and `effect: sparkle` together, which is exactly
+>   what was sent.
+>
+> So readback is usable again now that the colour actually reaches the effect. The rule that
+> still holds: **never compare two effects by readback alone.** If two different inputs
+> produce identical output, you are measuring a constant, not your input — the check that
+> would have caught the original error immediately.
+>
+> The bridge remains the ground truth for effect state:
+> `GET https://<bridge>/clip/v2/resource/light/<uuid>` →
+> `effects_v2.status.parameters.color.xy`.
 
 ## States
 
@@ -116,7 +129,7 @@ Four states, folded from the whole fleet:
 | `working` | blue ~20%, `sparkle` | at least one agent is working |
 | `blocked` | solid amber, ~35% | at least one agent is waiting on you |
 | `failed` | red ~45%, `fire` | something broke; go restart it |
-| landing | snap green → hold 15s → fade 15s | an agent just finished |
+| landing | snap green → hold 6s → fade 4s | an agent just finished |
 
 `blocked` is solid on purpose: nothing is actually moving, and a shimmer would imply
 otherwise. `failed` moves again, deliberately — amber-solid and red-solid are weak
@@ -337,7 +350,7 @@ along on the service call rather than being hardcoded in HA.
      → light.turn_off, stop.
 2. landed
      → green (rgb_done), transition 0, full brightness
-     → delay 15s
+     → delay 6s
      → script.beacon_paint(base, rgb, transition 15)
 3. else script.beacon_paint(base, rgb, transition 2):
      failed  → red,    ~45%, `fire` effect
@@ -347,7 +360,7 @@ along on the service call rather than being hardcoded in HA.
 ```
 
 `script.beacon_paint` is the shared base-state renderer, split out of `beacon_render`
-because the landing branch has to fall through to *exactly* this logic after its 15s hold —
+because the landing branch has to fall through to *exactly* this logic after its 6s hold —
 one renderer, two entry points, so the post-landing render can never drift from the
 non-landing one.
 
