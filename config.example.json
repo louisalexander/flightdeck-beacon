@@ -1,0 +1,4 @@
+{
+  "ha_url": "http://homeassistant.local:8123",
+  "token": "PASTE_A_HOME_ASSISTANT_LONG_LIVED_ACCESS_TOKEN_HERE"
+}
