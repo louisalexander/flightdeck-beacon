@@ -55,6 +55,10 @@ Of the six effects, **only `opal` actually shimmers on top of the requested colo
 as colour-preserving shimmers. Measured on this bulb at 12%, sending colour, brightness and
 effect in a single service call:
 
+<!-- The paragraph above and the table below are WRONG. Retained verbatim, with the
+     retraction immediately after, because the reasoning error is the useful artifact. -->
+
+
 | effect | resulting `rgb_color` | holds blue? |
 |---|---|---|
 | (none) | `[61, 138, 255]` | yes — true blue |
@@ -62,15 +66,45 @@ effect in a single service call:
 | `glisten` | `[255, 170, 95]` | **no — warm orange** |
 | `sparkle` | `[255, 167, 88]` | **no — warm orange** |
 
+> ## RETRACTED, 2026-08-14 — the table above measures the transport, not the bulb
+>
+> **Every effect on this bulb holds any colour you give it. The colour was never
+> reaching them.** Home Assistant's light entity can send a colour *or* start an effect,
+> never both:
+>
+> | attempt | outcome |
+> |---|---|
+> | colour + effect in one call | the effect's **default palette** wins |
+> | effect first, then colour | the colour wins and the effect switches **off** |
+> | clear the effect, read back | confirms the bulb is genuinely sitting at that default |
+>
+> So the numbers above are each effect's *default palette*, not its response to
+> `#1256A3`. The tell was there and was missed: two very different input colours read
+> back **byte-identical** (`[255, 167, 88]` both times). A readback that ignores its
+> input was never evidence about output.
+>
+> `opal` "held the blue family" only because opal's default palette happens to be
+> bluish. It was selected for a property it does not have, over effects that do.
+>
+> The fix is Hue's v2 API, which takes `effects_v2.action.parameters.color` alongside
+> the effect — this is what the Hue app's "custom sparkle" sets. Handed a colour,
+> `sparkle` holds `#1256A3` cleanly. `working` now paints through
+> `rest_command.beacon_sparkle`; see the 2026-08-14 re-assert design doc.
+>
+> **Cost of the error:** a live comparison judged on the wrong variable, a pinned wrong
+> choice, a spec section written to defend it, and a full `ha core restart` to deploy it.
+
 `fire` being unable to hold an arbitrary colour disqualifies it here but makes it precisely
 right for the `failed` state, which wants a red flame.
 
-> **Consequence found during live acceptance.** Under an effect, the bulb reports its own
-> palette rather than the RGB you sent, so `light.hue_color_lamp_1`'s `rgb_color` does **not**
-> read back the requested colour for `working` (`opal`) or `failed` (`fire`). This is bulb
-> behaviour, not a pipeline fault — but it means API readback cannot verify the colour of an
-> effect-driven state. Verify those by eye, or by asserting the `effect` attribute plus the
-> service call that was sent.
+> **Readback is blind under an effect.** `light.hue_color_lamp_1`'s `rgb_color` does **not**
+> return the requested colour while an effect runs — it returns that effect's palette
+> constant. API readback therefore cannot verify the colour of an effect-driven state, and
+> **must never be used to compare effects**, which is exactly the mistake retracted above.
+>
+> To verify an effect's real colour, query the Hue bridge directly:
+> `GET https://<bridge>/clip/v2/resource/light/<uuid>` returns
+> `effects_v2.status.parameters.color.xy`, which is the true value. Otherwise, use your eyes.
 
 ## States
 
@@ -79,7 +113,7 @@ Four states, folded from the whole fleet:
 | State | Lamp | Meaning |
 |---|---|---|
 | `idle` | off | nothing in flight |
-| `working` | dim blue ~12%, `opal` | at least one agent is working |
+| `working` | blue ~20%, `sparkle` | at least one agent is working |
 | `blocked` | solid amber, ~35% | at least one agent is waiting on you |
 | `failed` | red ~45%, `fire` | something broke; go restart it |
 | landing | snap green → hold 15s → fade 15s | an agent just finished |
@@ -90,11 +124,19 @@ neighbours across a dim room, so red is distinguished by motion as well as hue. 
 `failed > blocked > working > idle`, and a landing is suppressed under both `failed` and
 `blocked`: only one of those two things needs your hands.
 
-**`opal` is the pinned choice**, and the route there is worth recording. `sparkle` was picked
-first from a live three-way comparison — but that comparison was judged on shimmer *texture*
-while the lamp was in fact already rendering warm orange, and the mistake only surfaced once a
-separate brightness bug was fixed and the colour could be read cleanly. `opal` is the only
-effect on this hardware that keeps `working` in the blue family.
+**`sparkle` is the pinned choice**, painted through `rest_command.beacon_sparkle` so the
+effect is handed the fleet's own blue. The route there is worth recording, because it went
+wrong twice in the same way.
+
+`sparkle` was picked first from a live comparison, then dropped for `opal` on readback
+evidence, then restored when that evidence turned out to be an artifact of *how the effect
+was being started* rather than a property of the effect. Both errors share a root: judging a
+colour by an API field that does not report colour. The original pick was right; the
+reasoning that overturned it was not.
+
+The general lesson, which outlived the specific bug: **when a measurement returns the same
+value for two different inputs, it is not measuring your input.** That check would have
+caught this immediately — the two condemning readings were byte-identical.
 
 ### Inherited limitation: `blocked` over-reports
 
@@ -300,7 +342,7 @@ along on the service call rather than being hardcoded in HA.
 3. else script.beacon_paint(base, rgb, transition 2):
      failed  → red,    ~45%, `fire` effect
      blocked → amber,  ~35%, solid
-     working → blue,   ~12%, shimmer (see §4)
+     working → blue,   ~20%, `sparkle` via rest_command.beacon_sparkle (see §4)
      idle    → light.turn_off
 ```
 
@@ -385,7 +427,7 @@ still detached) across 10 runs: **min 0.215s, max 0.438s, mean ≈0.32s**, again
 not materialize in practice; three Python interpreter startups on this hardware cost well
 under half the budget.
 
-**Effect-driven states (`working`/`opal`, `failed`/`fire`) do not read back the requested
+**Effect-driven states (`working`/`sparkle`, `failed`/`fire`) do not read back the requested
 RGB.** Confirmed live: once the Hue effect is active, `rgb_color`/`brightness` reported by
 `light.hue_color_lamp_1` reflect the *effect's own* palette, not the values the service call
 passed — stable and repeatable for the working shimmer, mildly flickering (215-255) for `fire`. This
