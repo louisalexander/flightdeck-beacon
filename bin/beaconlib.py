@@ -94,9 +94,10 @@ def fold(sessions, prev):
     "done" is a level while the green landing is an edge. A non-emptiness
     test would re-fire green on every 15s reap tick, forever.
 
-    `and base != "blocked"` is the agreed priority -- amber outranks green.
-    A landing elsewhere must not steal the lamp from an agent that is
-    actually waiting on a human.
+    `and base not in ("blocked", "failed")` is the agreed priority -- amber
+    and red both outrank green. A landing elsewhere must not steal the lamp
+    from an agent that is actually waiting on a human, nor from one that
+    broke.
     """
     prev = prev if isinstance(prev, dict) else {}
     prev_base = prev.get("base", "idle")
@@ -120,3 +121,80 @@ def fold(sessions, prev):
     landed = bool(done_ids - prev_done) and base not in ("blocked", "failed")
     changed = landed or base != prev_base
     return base, landed, {"base": base, "done": sorted(done_ids)}, changed
+
+# --- home assistant transport ----------------------------------------------
+
+SERVICE = "script/beacon_render"
+
+# Fallbacks matching flightdeck's config/fleet.json, used only when the
+# snapshot arrives without a states block. The palette's real home is
+# fleet.json -- these exist so a malformed snapshot dims the lamp rather
+# than blacking it out.
+DEFAULT_COLORS = {
+    "working": (18, 86, 163),     # #1256A3
+    "blocked": (245, 166, 35),    # #F5A623
+    "done": (35, 134, 54),        # #238636
+    "failed": (180, 35, 24),      # #B42318
+    "idle": (0, 0, 0),
+}
+
+def service_url(config):
+    base = (config.get("ha_url") or "").rstrip("/")
+    return "{}/api/services/{}".format(base, SERVICE)
+
+def hex_to_rgb(value, default):
+    """Parses '#RRGGBB' (or 'RRGGBB') into [r, g, b]. Returns default on anything else."""
+    try:
+        text = str(value).lstrip("#")
+        if len(text) != 6:
+            return default
+        return [int(text[i:i + 2], 16) for i in (0, 2, 4)]
+    except Exception:
+        return default
+
+def palette_rgb(states, name):
+    """Resolves one state's colour out of the snapshot palette."""
+    entry = states.get(name) if isinstance(states, dict) else None
+    color = entry.get("color") if isinstance(entry, dict) else None
+    return hex_to_rgb(color, list(DEFAULT_COLORS.get(name, (0, 0, 0))))
+
+def service_body(base, landed, states):
+    """Builds the script.beacon_render service payload.
+
+    Colours ride along with the call so that flightdeck's config/fleet.json
+    stays the single source of truth for the palette. The Home Assistant
+    script keeps only policy -- brightness, effect and timing -- which is
+    meant to differ between a backlit key and a lamp lighting a room.
+    """
+    return json.dumps({
+        "base": base,
+        "landed": bool(landed),
+        "rgb": palette_rgb(states, base),
+        "rgb_done": palette_rgb(states, "done"),
+    }, separators=(",", ":"))
+
+def ensure_headers_file(config):
+    """Writes the curl header file at 0600 and returns its path.
+
+    The token goes in a file rather than in argv because `ps` is world
+    readable: `curl -H "Authorization: Bearer <token>"` would leak a
+    long-lived Home Assistant token to every process on the machine.
+    """
+    path = curl_headers_path()
+    wanted = "Authorization: Bearer {}\nContent-Type: application/json\n".format(
+        config.get("token") or "")
+    existing = None
+    try:
+        with open(str(path), "r", encoding="utf-8") as handle:
+            existing = handle.read()
+    except Exception:
+        existing = None
+    if existing != wanted:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            os.write(fd, wanted.encode("utf-8"))
+        finally:
+            os.close(fd)
+    os.chmod(str(path), 0o600)
+    return path

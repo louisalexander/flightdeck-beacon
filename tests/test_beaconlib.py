@@ -242,5 +242,99 @@ class TestFold(unittest.TestCase):
         self.assertEqual((base, landed, changed), ("idle", False, False))
 
 
+class TestTransportBuilders(BeaconlibTestCase):
+
+    def test_service_url_targets_the_beacon_render_script_service(self):
+        cases = [
+            ("plain", "http://ha.local:8123"),
+            ("trailing slash", "http://ha.local:8123/"),
+            ("several trailing slashes", "http://ha.local:8123///"),
+        ]
+        want = "http://ha.local:8123/api/services/script/beacon_render"
+        for label, base in cases:
+            with self.subTest(case=label):
+                self.assertEqual(beaconlib.service_url({"ha_url": base}), want)
+
+    def test_hex_to_rgb_parses_the_fleet_json_palette(self):
+        cases = [
+            ("working blue", "#1256A3", [18, 86, 163]),
+            ("blocked amber", "#F5A623", [245, 166, 35]),
+            ("done green", "#238636", [35, 134, 54]),
+            ("no leading hash", "1256A3", [18, 86, 163]),
+            ("lowercase", "#f5a623", [245, 166, 35]),
+        ]
+        for label, value, want in cases:
+            with self.subTest(case=label):
+                self.assertEqual(beaconlib.hex_to_rgb(value, [0, 0, 0]), want)
+
+    def test_hex_to_rgb_falls_back_on_anything_unparseable(self):
+        fallback = [1, 2, 3]
+        for label, value in [("empty", ""), ("none", None), ("short", "#12"),
+                             ("not hex", "#ZZZZZZ"), ("wrong type", 42),
+                             ("rgba", "#11223344")]:
+            with self.subTest(case=label):
+                self.assertEqual(beaconlib.hex_to_rgb(value, fallback), fallback)
+
+    def test_service_body_encodes_landed_as_a_real_json_boolean(self):
+        cases = [
+            ("landed", "working", True, True),
+            ("not landed", "idle", False, False),
+            ("truthy non-bool is coerced", "idle", 1, True),
+        ]
+        for label, base, landed, want in cases:
+            with self.subTest(case=label):
+                body = json.loads(beaconlib.service_body(base, landed, {}))
+                self.assertEqual(body["base"], base)
+                self.assertIs(body["landed"], want)
+
+    def test_service_body_resolves_colours_from_the_snapshot_palette(self):
+        states = {
+            "working": {"color": "#1256A3"},
+            "blocked": {"color": "#F5A623"},
+            "done": {"color": "#238636"},
+        }
+        cases = [
+            ("working", "working", [18, 86, 163]),
+            ("blocked", "blocked", [245, 166, 35]),
+        ]
+        for label, base, want_rgb in cases:
+            with self.subTest(case=label):
+                body = json.loads(beaconlib.service_body(base, False, states))
+                self.assertEqual(body["rgb"], want_rgb)
+                self.assertEqual(body["rgb_done"], [35, 134, 54])
+
+    def test_service_body_uses_built_in_defaults_when_the_palette_is_missing(self):
+        # flightdeck could ship a snapshot with no states block; the lamp must
+        # still light in the right colours rather than going black.
+        body = json.loads(beaconlib.service_body("working", True, {}))
+        self.assertEqual(body["rgb"], list(beaconlib.DEFAULT_COLORS["working"]))
+        self.assertEqual(body["rgb_done"], list(beaconlib.DEFAULT_COLORS["done"]))
+
+    def test_service_body_for_idle_still_carries_a_usable_rgb(self):
+        # idle turns the lamp off and ignores rgb, but the field must exist so
+        # the Home Assistant script never templates against an undefined value.
+        body = json.loads(beaconlib.service_body("idle", False, {}))
+        self.assertEqual(len(body["rgb"]), 3)
+
+    def test_headers_file_is_0600_and_carries_the_bearer_token(self):
+        path = beaconlib.ensure_headers_file({"token": "sekrit"})
+        mode = stat.S_IMODE(os.stat(str(path)).st_mode)
+        self.assertEqual(mode, 0o600, oct(mode))
+        self.assertIn("Bearer sekrit", path.read_text(encoding="utf-8"))
+
+    def test_headers_file_is_rewritten_when_the_token_changes(self):
+        beaconlib.ensure_headers_file({"token": "old"})
+        path = beaconlib.ensure_headers_file({"token": "new"})
+        body = path.read_text(encoding="utf-8")
+        self.assertIn("Bearer new", body)
+        self.assertNotIn("old", body)
+
+    def test_headers_file_is_repaired_if_its_mode_was_loosened(self):
+        path = beaconlib.ensure_headers_file({"token": "t"})
+        os.chmod(str(path), 0o644)
+        path = beaconlib.ensure_headers_file({"token": "t"})
+        self.assertEqual(stat.S_IMODE(os.stat(str(path)).st_mode), 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

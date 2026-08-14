@@ -93,3 +93,34 @@ print(d['base'], d['done'])
   [ "$status" -eq 0 ]
   [ "$(dispatched)" = "1" ]
 }
+
+@test "NO CONFIG: dispatch is skipped and logged, never fatal" {
+  unset BEACON_DRY_RUN
+  run bash -c "snap '[{\"session_id\":\"A\",\"state\":\"working\"}]' | '$BIN/beacon-render'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  grep -q "no ha_url/token configured" "$BEACON_HOME/beacon.log"
+}
+
+@test "TOKEN SAFETY: the token never appears in the curl argv" {
+  unset BEACON_DRY_RUN
+  export BEACON_FAKE_CURL="$BATS_TEST_TMPDIR/argv.txt"
+  cat > "$BEACON_HOME/config.json" <<'EOF'
+{"ha_url":"http://127.0.0.1:1/","token":"SUPERSECRET"}
+EOF
+  run bash -c "snap '[{\"session_id\":\"A\",\"state\":\"working\"}]' | '$BIN/beacon-render'"
+  [ "$status" -eq 0 ]
+  run cat "$BEACON_FAKE_CURL"
+  [[ "$output" != *"SUPERSECRET"* ]]
+  [[ "$output" == *"beacon_render"* ]]
+}
+
+@test "UNREACHABLE HA: a refused connection never fails the renderer" {
+  unset BEACON_DRY_RUN
+  cat > "$BEACON_HOME/config.json" <<'EOF'
+{"ha_url":"http://127.0.0.1:1/","token":"x"}
+EOF
+  run bash -c "snap '[{\"session_id\":\"A\",\"state\":\"working\"}]' | '$BIN/beacon-render'"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+}

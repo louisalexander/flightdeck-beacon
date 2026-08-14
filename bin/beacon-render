@@ -13,19 +13,23 @@ agent. Errors go to ~/.beacon/beacon.log only.
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import beaconlib  # noqa: E402
 
+CURL_TIMEOUT_SECS = "5"
+
 
 def dispatch(base, landed, states):
-    """Sends the desired state onward. Replaced with real transport in Task 4.
+    """Fires the state at Home Assistant and returns immediately.
 
-    `states` is flightdeck's palette, passed straight through from the
-    snapshot so colours have exactly one home (flightdeck's config/fleet.json)
-    rather than being duplicated into the Home Assistant scripts.
+    Detached on purpose. The teardown chain is
+    SessionEnd -> fleet-emit -> fleet-reconcile -> here, and SessionEnd hooks
+    share a 1.5 SECOND budget across all hooks. Nothing on this path may
+    block on the network.
     """
     dry = os.environ.get("BEACON_DRY_RUN")
     if dry:
@@ -33,6 +37,24 @@ def dispatch(base, landed, states):
             handle.write(json.dumps({"base": base, "landed": landed},
                                     separators=(",", ":")) + "\n")
         return
+
+    config = beaconlib.load_config()
+    if not config.get("ha_url") or not config.get("token"):
+        beaconlib.log("render: no ha_url/token configured; skipping dispatch")
+        return
+
+    headers = beaconlib.ensure_headers_file(config)
+    curl = os.environ.get("BEACON_FAKE_CURL")
+    argv = ["curl", "-sf", "-m", CURL_TIMEOUT_SECS, "-X", "POST",
+            "-H", "@{}".format(headers),
+            "-d", beaconlib.service_body(base, landed, states),
+            beaconlib.service_url(config)]
+    if curl:
+        # Test seam: record argv instead of talking to a real Home Assistant.
+        argv = ["/bin/sh", "-c", 'printf "%s\\n" "$@" > "$0"', curl] + argv
+
+    subprocess.Popen(argv, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
 
 
 def run():
