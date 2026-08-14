@@ -69,6 +69,25 @@ Four states, folded from the whole fleet:
 `blocked` is solid on purpose: nothing is actually moving, and a shimmer would imply
 otherwise.
 
+### Inherited limitation: `blocked` over-reports
+
+flightdeck registers **exactly five hooks** and deliberately excludes `PreToolUse` /
+`PostToolUse` ("they fire per tool call and would tax every agent action"). A consequence:
+`Notification` sets a session to `blocked` when the permission prompt appears, but **no
+event fires when you answer it**. The session's next event is `Stop`, at the end of the
+turn. So a session that hit one permission prompt reads `blocked` for the entire remainder
+of that turn, even while actively working.
+
+This is flightdeck's behaviour, not Beacon's — the Stream Deck key over-reports amber in
+exactly the same way. Beacon inherits it and **must not attempt to work around it** by
+registering its own per-tool-call hooks; that would reintroduce the cost flightdeck
+explicitly refused. If it proves annoying in use, the fix belongs upstream in flightdeck,
+where both renderers would benefit.
+
+Practical effect on the lamp: amber is a *floor*, not a precise signal. It means "at some
+point this turn, an agent wanted you" — which is still actionable, and still better than
+blue.
+
 ### Palette
 
 Beacon does **not** define colours. It reads flightdeck's existing `states` block in
@@ -86,6 +105,32 @@ fork the colours.
 `failed` (`#B42318`) is declared in `fleet.json` but never emitted — `fleet-emit` has no
 `StopFailure` hook. It is **deferred out of v1** but fully specified under "Deferred", so
 the four-state fold below has a defined place to grow a fifth.
+
+## Constraints inherited from flightdeck
+
+`beacon-render` runs on flightdeck's execution paths, so flightdeck's global constraints
+apply to it verbatim:
+
+- **Python 3.9 syntax, standard library only.** No third-party packages, no venv. 3.9 is
+  the floor because `fleet-reap` runs under **launchd**, whose `PATH` resolves
+  CommandLineTools 3.9.6 rather than the Homebrew 3.13 an interactive shell gets — and reap
+  calls reconcile, which calls `beacon-render`. Avoid `match` and `X | Y` annotations.
+- **Never write to stdout, always exit 0.** `beacon-render` is reachable from a Claude Code
+  hook. A bug in it must never break a real agent. Errors go to a log file only.
+- **All writes atomic** — temp file in the same directory, then `os.replace()`.
+- **`subprocess` always takes a list, never `shell=True`.**
+
+## Prerequisite: flightdeck must be installed
+
+flightdeck is **built but not wired** on this machine as of 2026-08-13: `~/.fleet/` holds
+only `fleet.log` with no `sessions/`, the launchd reaper is not loaded, and `fleet-emit` is
+registered in no `settings.json`. Installation is flightdeck's own **Task 12**
+(`install.sh`, `fleet-doctor`), which is not yet built.
+
+Beacon therefore **cannot be verified end-to-end** until that lands. It can, however, be
+built and fully unit-tested before it — because the seam is JSON on stdin, every fold
+behaviour is reachable with a synthetic snapshot and no live agent at all. Only the final
+acceptance task depends on flightdeck being live.
 
 ## Architecture
 
@@ -184,8 +229,8 @@ alongside `landed`.
 
 **Change detection.** State persists to `~/.beacon/last.json` (atomic write via temp file +
 `os.replace`, mirroring `fleetlib.write_json_atomic`). Home Assistant is called only when
-`base` changed **or** `landed` is true. Both the per-tool-call event storm and the 15s reap
-tick therefore collapse to zero network traffic when nothing has actually changed.
+`base` changed **or** `landed` is true, so the 15s reap tick collapses to zero network
+traffic whenever nothing has actually changed.
 
 **The HA call is fully detached** — `subprocess.Popen(..., start_new_session=True)`, no
 wait. This is load-bearing: the teardown chain is `SessionEnd → fleet-emit →
