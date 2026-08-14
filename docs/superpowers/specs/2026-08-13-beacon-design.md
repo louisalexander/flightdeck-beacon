@@ -33,18 +33,27 @@ for the laptop-sleep case (see Failure Modes).
 |---|---|
 | Entity | `light.hue_color_lamp_1` (friendly name **"Beacon"**) |
 | Hardware | Signify LCT016, Hue White & Color A19 |
-| Firmware | `1.88.1` at time of writing |
-| `supported_features` | `40` = flash + transition — **no `effect` bit** |
+| Firmware | `1.116.12` (updated 2026-08-13, from `1.88.1`) |
+| `supported_features` | `44` = flash + transition + **effect** |
+| `effect_list` | `off, candle, fire, prism, sparkle, opal, glisten` |
 
-The missing `effect` support is a **firmware** limitation, not a model limitation. The
-identical LCT016 at `light.master_bedroom_sitting_room_lamp_bulb`, on firmware `1.116.12`,
-reports `supported_features: 44` and `effect_list: [candle, fire, prism, sparkle, opal,
-glisten]`. Same model, same bridge, same integration — only the firmware differs. A Hue
-update is in progress; the design must not block on it (see §4).
+Effects were initially absent. That was a **firmware** limitation, not a model limitation:
+the identical LCT016 at `light.master_bedroom_sitting_room_lamp_bulb`, already on
+`1.116.12`, reported `supported_features: 44` while Beacon on `1.88.1` reported `40`. Same
+model, same bridge, same integration — only the firmware differed.
+
+> **Gotcha worth keeping.** Updating the bulb firmware was **not sufficient**. Home
+> Assistant caches device capabilities at integration setup, so Beacon still reported `40`
+> and `effect_list: None` after the Hue update landed. It took
+> `homeassistant.reload_config_entry` on the entity to re-read capabilities from the bridge.
+> Expect the same after any future Hue firmware change.
 
 Of the six effects, only `opal`, `glisten` and `sparkle` shimmer *on top of the current
 colour*. `candle` and `fire` force a warm palette and `prism` crawls through hues — none of
 those three can stay blue.
+
+`fire` being unable to hold an arbitrary colour disqualifies it here but makes it precisely
+right for the deferred `failed` state, which wants a red flame — see "Deferred".
 
 ## States
 
@@ -75,8 +84,8 @@ filling a room, **keep the hue identical and let brightness differ per renderer*
 fork the colours.
 
 `failed` (`#B42318`) is declared in `fleet.json` but never emitted — `fleet-emit` has no
-`StopFailure` hook. Out of scope here; noted so a future turn-died-on-an-API-error state
-has a colour waiting for it.
+`StopFailure` hook. It is **deferred out of v1** but fully specified under "Deferred", so
+the four-state fold below has a defined place to grow a fifth.
 
 ## Architecture
 
@@ -214,18 +223,24 @@ sleep gate means a late-night session cannot light the house.
 that unlike an `automations.yaml`-only change, this triggers a **full `ha core restart`** on
 deploy.
 
-## 4 — The shimmer, without blocking on firmware
+## 4 — The shimmer
 
-While the bulb reports no `effect_list`, `working` renders as solid dim blue. A `choose`
-branch in the script applies `effect: opal` **only when the bulb advertises it**:
+Native, no loop: `working` renders as dim blue with a Hue `effect` applied, and the bulb
+holds the shimmer in hardware until told otherwise. This is why `working` needs no
+`repeat/while` automation — unlike HA §51's red breathe, which predates effect support on
+those bulbs and drives the pulse from HA with two commands per cycle.
 
-```yaml
-- conditions: "{{ 'opal' in (state_attr('light.hue_color_lamp_1','effect_list') or []) }}"
-```
+The candidates were compared live on the lamp at the real intended brightness (12%):
+`opal`, `glisten`, `sparkle`. **Pinned choice: see below.** `candle`, `fire` and `prism`
+are unusable here — the first two force a warm palette, the third crawls through hues, and
+none can stay blue.
 
-So the pending firmware update is a **live upgrade, not a code change** — the same deployed
-script starts shimmering the moment Hue pushes it. Once it lands, compare `opal` /
-`glisten` / `sparkle` on the actual lamp and pin the winner.
+Because the capability is now confirmed present, the script applies the effect directly
+rather than guarding it behind a `choose` on `effect_list`. The one caveat is the reload
+gotcha recorded under "The light": if a future firmware change makes HA drop the `effect`
+bit again, `light.turn_on` will reject the effect and that single call fails. The renderer
+should therefore mark the effect call `continue_on_error` so a rejected effect degrades to
+solid colour rather than aborting the render.
 
 ## 5 — Failure modes
 
@@ -261,7 +276,52 @@ currently *absent* from `tests/fixtures/entities.txt`, so referencing it would f
 
 ## Deferred
 
-- `failed` / `StopFailure` → red. `fleet.json` already reserves the colour.
+### `failed` — red flame (agreed treatment, deferred implementation)
+
+A fifth state meaning **"come back to the terminal and restart something."** Agreed in
+design, deliberately out of v1 so it does not gate the first working lamp. When built:
+
+**Treatment: red flame.** Hue's native `fire` effect on red. `fire` was disqualified for
+`working` precisely because it forces its own warm palette and cannot hold blue — which is
+exactly what makes it right here. The bulb renders a real flicker in hardware, so no loop
+is needed. **Confirmed available** on Beacon as of the 2026-08-13 firmware update, and
+previewed live on the lamp, so this state carries no firmware prerequisite — only the
+flightdeck work below.
+
+Distinguishing it from `blocked` by **motion** as well as hue is the point — amber solid
+and red solid are weak neighbours across a dim room. There is house precedent for red
+motion meaning trouble: HA §51 "Night Lights Red Beacon" breathes slow red while the alarm
+is triggered. A flame is distinct from that breathe, so the two do not collide.
+
+**Semantics when built:**
+
+- A **level, not an edge** — unlike the green landing. Red persists until dealt with,
+  cleared by the next `UserPromptSubmit` (→ `working`) or `SessionEnd` (→ gone).
+- Priority becomes `failed > blocked > working > idle`. A landing is suppressed under red
+  exactly as it is under amber: `landed = ... and base not in ("blocked", "failed")`.
+- **Respects the sleep gate like everything else.** `input_boolean.sleeping` on → lamp off,
+  no exceptions. A turn that died at 3am is still dead at 7am, and will show red the moment
+  Good Morning clears the flag. Nothing wakes the house.
+
+**Prerequisites, both outside this repo:**
+
+1. **flightdeck must emit it.** `fleet-emit`'s `EVENT_STATES` maps five events;
+   `StopFailure` is not one of them. Adding it also gives the Stream Deck red keys, using
+   the `#B42318` already sitting unused in `fleet.json`.
+2. **`StopFailure` must be verified empirically first.** `docs/hook-contract.md` confirmed
+   five events against CLI v2.1.232; `StopFailure` was not among them. The published docs
+   describe it, but those same docs disagree with the observed payloads on two field names
+   (`start_reason` vs the observed `source`; `end_reason` vs the observed `reason`). Probe
+   it under the existing methodology before depending on it.
+
+**Known gap.** `StopFailure` catches a turn dying on an API error, not a Claude Code
+process that crashes outright — `fleet-reap` removes that session and the lamp goes quietly
+off. That is arguably the case most deserving of "restart something", but surfacing it
+means revisiting flightdeck's reap philosophy (a dead session currently vanishes), so it is
+left alone here and recorded as an open question.
+
+### Other
+
 - A watchdog for the laptop-sleep case.
 - Per-session or per-room output (more than one lamp).
 - Distinguishing "Claude asked you a question and stopped" from "work landed" — both
