@@ -19,6 +19,7 @@
 
 body {
   margin: 0;
+  overflow-wrap: break-word;
   background-color: var(--night);
   /* the social preview's console grid, at its 11% */
   background-image:
@@ -93,6 +94,7 @@ strong { color: var(--airframe); font-weight: 600; }
 
 code {
   font-family: var(--mono);
+  overflow-wrap: anywhere;
   font-size: .87em;
   background: var(--interior);
   color: var(--airframe);
@@ -115,7 +117,7 @@ th {
   color: var(--secondary);
 }
 td { padding: .8rem 1rem .8rem 0; border-bottom: 1px solid rgba(24, 33, 45, .6); vertical-align: top; }
-td:first-child { color: var(--airframe); white-space: nowrap; }
+td:first-child { color: var(--airframe); }
 
 ol { padding-left: 1.3rem; }
 ol > li { margin-bottom: 1.4rem; }
@@ -134,6 +136,10 @@ ol > li::marker { font-family: var(--mono); font-size: .85rem; color: var(--comm
   color: var(--secondary);
 }
 .foot a { border-bottom: none; }
+
+@media (min-width: 34.001rem) {
+  td:first-child { white-space: nowrap; }
+}
 
 @media (max-width: 34rem) {
   .hero { padding-top: 3.25rem; }
