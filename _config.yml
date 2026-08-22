@@ -1,0 +1,7 @@
+# The site is just the README. docs/ holds the design specs and plans, which
+# carry Home Assistant Jinja ({{ ... }}) that Jekyll's Liquid parser chokes on
+# before markdown runs — code fences do not protect it. Read them on GitHub.
+exclude:
+  - docs
+  - tests
+  - bin
