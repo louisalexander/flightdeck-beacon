@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Flightdeck Beacon favicon</title>
+  <desc id="desc">The Flightdeck Beacon mark on a near-black console field.</desc>
+  <rect width="512" height="512" rx="92" fill="#020304"/>
+  <path d="M256 72 422 406 256 338 90 406Z" fill="#0C131D" stroke="#EEF5FF" stroke-width="36" stroke-linejoin="round"/>
+  <path d="M256 72V338" fill="none" stroke="#1256A3" stroke-width="36"/>
+  <circle cx="256" cy="338" r="38" fill="#F5A623"/>
+</svg>

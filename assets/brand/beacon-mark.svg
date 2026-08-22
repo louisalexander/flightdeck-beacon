@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-labelledby="title desc">
+  <title id="title">Flightdeck Beacon mark</title>
+  <desc id="desc">A forward vector with a blue command path and an amber operator beacon.</desc>
+  <path d="M256 46 456 442 256 360 56 442Z" fill="#0C131D" stroke="#EEF5FF" stroke-width="42" stroke-linejoin="round"/>
+  <path d="M256 46V360" fill="none" stroke="#1256A3" stroke-width="42"/>
+  <circle cx="256" cy="360" r="42" fill="#F5A623"/>
+</svg>

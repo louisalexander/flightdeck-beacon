@@ -1,3 +1,18 @@
+title: Beacon
+description: >-
+  An ambient lamp for your agent fleet: folds a flightdeck fleet snapshot into
+  one light state — working, waiting on you, or just finished — and paints it
+  onto a Philips Hue bulb through Home Assistant.
+repository: louisalexander/flightdeck-beacon
+url: https://louisalexander.github.io
+baseurl: /flightdeck-beacon
+
+plugins:
+  - jekyll-seo-tag
+
+# No `theme:` — the site is _layouts/default.html and assets/css/beacon.css,
+# which carry flightdeck's Vector Eight / Beacon identity. See assets/brand/.
+
 # The site is just the README. docs/ holds the design specs and plans, which
 # carry Home Assistant Jinja ({{ ... }}) that Jekyll's Liquid parser chokes on
 # before markdown runs — code fences do not protect it. Read them on GitHub.

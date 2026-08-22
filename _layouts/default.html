@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#020304">
+    {% seo %}
+    <link rel="icon" href="{{ '/assets/brand/beacon-favicon.svg' | relative_url }}" type="image/svg+xml">
+    <link rel="stylesheet" href="{{ '/assets/css/beacon.css' | relative_url }}">
+  </head>
+  <body>
+    <div class="wrap">
+      <header class="hero">
+        <div class="hero-lockup">
+          <img class="hero-mark" src="{{ '/assets/brand/beacon-mark.svg' | relative_url }}"
+               alt="The Flightdeck Beacon mark: a forward vector with a blue command path and an amber operator beacon.">
+          <div>
+            <h1 class="hero-wordmark">BEACON</h1>
+            <p class="hero-sub">AMBIENT FLEET LAMP</p>
+          </div>
+        </div>
+
+        <ul class="states">
+          <li><span class="dot dot-off"></span>IDLE</li>
+          <li><span class="dot dot-working"></span>WORKING</li>
+          <li><span class="dot dot-blocked"></span>WAITING ON YOU</li>
+          <li><span class="dot dot-done"></span>DONE</li>
+        </ul>
+
+        <div class="hero-rule"></div>
+      </header>
+
+      <main class="prose">
+        {{ content }}
+      </main>
+
+      <footer class="foot">
+        <a href="https://github.com/{{ site.repository }}">SOURCE</a> ·
+        <a href="https://github.com/louisalexander/flightdeck">FLIGHTDECK</a> ·
+        MARK FROM THE VECTOR EIGHT / BEACON IDENTITY
+      </footer>
+    </div>
+  </body>
+</html>
